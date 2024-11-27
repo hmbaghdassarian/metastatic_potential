@@ -1,0 +1,17 @@
+**/*.csv
+**/*.h5ad
+**/*.ipynb_checkpoints
+**/*.ipynb_checkpoints/
+**/*.slurm
+**/*.npz
+**/*.pth
+**/__pycache__/
+/notebooks/cpa/
+**/*lightning_logs/
+**/*.pickle
+**/*.log
+**/*.err
+**/*.out
+**/*trash*
+**/*backup*
+
