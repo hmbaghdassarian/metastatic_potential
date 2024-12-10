@@ -3,13 +3,19 @@
 
 # To do: load in non feature selected, non mean-centered data
 
-# In[212]:
+# In[17]:
 
 
 import os
+import pickle
+import pathlib
 
 import numpy as np
 import pandas as pd
+
+import optuna
+from optuna.samplers import CmaEsSampler, TPESampler
+from optuna.distributions import CategoricalDistribution
 
 from sklearn.model_selection import GridSearchCV, cross_val_score, KFold
 from sklearn.pipeline import Pipeline
@@ -24,7 +30,36 @@ from scipy.stats import pearsonr
 from sklearn.utils import shuffle
 
 
-# In[213]:
+# In[18]:
+
+
+data_path = '/nobackup/users/hmbaghda/metastatic_potential/'
+random_state = 42
+
+n_cores = 80
+os.environ["OMP_NUM_THREADS"] = str(n_cores)
+os.environ["MKL_NUM_THREADS"] = str(n_cores)
+os.environ["OPENBLAS_NUM_THREADS"] = str(n_cores)
+os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_cores)
+os.environ["NUMEXPR_NUM_THREADS"] = str(n_cores)
+
+
+# In[19]:
+
+
+def write_pickled_object(object_, file_name: str) -> None:
+    if '.' in file_name:
+        p = pathlib.Path(file_name)
+        extensions = "".join(p.suffixes)
+        file_name = str(p).replace(extensions, '.pickle')
+    else:
+        file_name = file_name + '.pickle'
+
+    with open(file_name, 'wb') as handle:
+        pickle.dump(object_, handle)
+
+
+# In[20]:
 
 
 # Feature selection transformer
@@ -47,158 +82,304 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
     
 class MeanCenterer(TransformerMixin, BaseEstimator):
     def fit(self, X, y=None):
-        self.mean_ = np.mean(X, axis=0)
+#         self.mean_ = np.mean(X, axis=0)
         return self
 
     def transform(self, X, y=None):
-        return X - self.mean_
+        return X - np.mean(X, axis=0)
     
 def pearson_corr_scorer(y_true, y_pred):
     return pearsonr(y_true, y_pred)[0]
 
+class PLSRegression_X(PLSRegression):
+    def transform(self, X, y=None):
+        X_transformed = super().transform(X, y)
+        if isinstance(X_transformed, tuple):
+            X_transformed = X_transformed[0]
+        return X_transformed
 
-# In[214]:
+
+# In[21]:
 
 
-def create_pipeline(n_cores, random_state):
-    # Step 1: Feature reduction/selection
-    feature_reduction = [
-        ('PLS', PLSRegression(scale = False)),
-        ('PCA', PCA(random_state=random_state)),
-        ('FeatureSelector', FeatureSelector(method='top_n_cv'))
-    ]
-    feature_reduction_params = [
-        {'PLS__n_components': [2, 5, 10, 25, 50, 100, 200]},
-        {'PCA__n_components': [2, 5, 10, 25, 50, 100, 200]},
-        {'FeatureSelector__n_features': [250, 500, 1000, 5000, 17879]} # last one is no selecting features
-    ]
+class HybridSampler(optuna.samplers.BaseSampler):
+    def __init__(self, primary_sampler, fallback_sampler):
+        self.primary_sampler = primary_sampler  # e.g., CmaEsSampler
+        self.fallback_sampler = fallback_sampler  # e.g., TPESampler
+
+    def infer_relative_search_space(self, study, trial):
+        # Let the primary sampler define the relative search space
+        return self.primary_sampler.infer_relative_search_space(study, trial)
+
+    def sample_relative(self, study, trial, search_space):
+        # Let the primary sampler handle relative sampling
+        return self.primary_sampler.sample_relative(study, trial, search_space)
+
+    def sample_independent(self, study, trial, param_name, param_distribution):
+        # Use the fallback sampler for unsupported parameter types
+        if isinstance(param_distribution, CategoricalDistribution):
+            return self.fallback_sampler.sample_independent(study, trial, param_name, param_distribution)
+        # Default to the primary sampler
+        return self.primary_sampler.sample_independent(study, trial, param_name, param_distribution)
+
+
+
+def optuna_objective(trial, X, y, inner_cv, n_cores, random_state):
+    # Define feature reduction/selection method
+    feature_step = trial.suggest_categorical("feature_step", ["PLS", "PCA", "FeatureSelector"])
+
+    if feature_step == "PLS":
+        steps = [
+            ("mean_centering", MeanCenterer()),
+            ("feature_reduction", PLSRegression_X(n_components=trial.suggest_categorical("PLS__n_components", [2, 5, 10, 25, 50, 100]))),
+        ]
+    elif feature_step == "PCA":
+        steps = [
+            ("mean_centering", MeanCenterer()),
+            ("feature_reduction", PCA(n_components=trial.suggest_categorical("PCA__n_components", [2, 5, 10, 25, 50, 100]), random_state=random_state)),
+        ]
+    elif feature_step == "FeatureSelector":
+        steps = [
+            ("feature_reduction", FeatureSelector(method="top_n_cv", n_features=trial.suggest_categorical("FeatureSelector__n_features", [250, 500, 1000, 5000, 17879]))),
+            ("mean_centering", MeanCenterer()),
+        ]
+    # Define model
+    model_type = trial.suggest_categorical("model_type", ["SVR", "RFR"])
+    if model_type == "SVR":
+        steps.append(("model", SVR(
+            kernel=trial.suggest_categorical("SVR__kernel", ["rbf", "poly"]),
+            C=trial.suggest_float("SVR__C", 1e-4, 1e2, log = True),
+            degree=trial.suggest_int("SVR__degree", 2, 4),
+#             coef0=trial.suggest_uniform("SVR__coef0", 0, 2),
+            gamma=0.001
+        )))
+    elif model_type == "RFR":
+        steps.append(("model", RandomForestRegressor(
+            n_estimators=trial.suggest_int("RFR__n_estimators", 300, 1600, step=400),
+            max_features=trial.suggest_categorical("RFR__max_features", ["sqrt", "log2", 0.5, 0.75, 1]),
+            max_samples=trial.suggest_categorical("RFR__max_samples", [0.25, 0.5, 0.75, None]),
+            max_depth=trial.suggest_categorical("RFR__max_depth", [None, 10, 25, 50, 100, 200]),
+            random_state=random_state,
+            n_jobs=int(n_cores/inner_cv.n_splits)
+        )))
+
+    # Create the pipeline
+    pipeline = Pipeline(steps)
+
+    # Evaluate with cross-validation
+    mse = -cross_val_score(pipeline, X, y, 
+                           cv=inner_cv, 
+                           scoring="neg_mean_squared_error", 
+                           n_jobs=inner_cv.n_splits).mean()
+
+#     for fold_idx, (train_idx, val_idx) in enumerate(inner_cv.split(X, y)):
+#         X_train, X_val = X[train_idx], X[val_idx]
+#         y_train, y_val = y[train_idx], y[val_idx]
+
+#         # Train and evaluate the pipeline on the current fold
+#         pipeline.fit(X_train, y_train)
+#         y_val_pred = pipeline.predict(X_val)
+#         mse = mean_squared_error(y_val, y_val_pred)
+
+#         # Store the MSE for this fold
+#         mse_scores.append(mse)
+
+#         # Report intermediate result to Optuna
+#         trial.report(np.mean(mse_scores), step=fold_idx)
+
+#         # Check if the trial should be pruned
+#         if trial.should_prune():
+#             raise optuna.exceptions.TrialPruned()
     
-    # Step 2: Modeling
-    models = [
-        ('SVR', SVR(gamma=0.001)),
-        ('RFR', RandomForestRegressor(random_state=random_state, n_jobs=n_cores))  # Pass random_state and n_jobs
-    ]
-    model_params = [
-        {
-            'SVR__kernel': ['rbf', 'poly'],
-            'SVR__C': [0.001, 0.01, 0.1, 1, 10, 100],
-            'SVR__degree': [2, 3, 4],
-            'SVR__coef0': [0, 0.1, 0.5, 1.0, 1.2, 2.0]
-        },
-        {
-            'RFR__n_estimators': range(100, 1001, 250),
-            'RFR__max_features': ['sqrt', 'log2', 0.5, 0.75, 1],
-            'RFR__max_samples': [0.25, 0.5, 0.75, None],
-            'RFR__max_depth': [None, 10, 25, 50, 100, 200]
-        }
-    ]
+#     return np.mean(mse_scores)
 
-    return feature_reduction, feature_reduction_params, models, model_params
+    return mse
 
 
-# In[215]:
+def generate_best_pipeline(study):
+    best_params = study.best_params
+    steps = []
+    if best_params["feature_step"] == "PLS":
+        steps.append(("mean_centering", MeanCenterer()))
+        steps.append(("feature_reduction", PLSRegression_X(n_components=best_params["PLS__n_components"])))
+    elif best_params["feature_step"] == "PCA":
+        steps.append(("mean_centering", MeanCenterer()))
+        steps.append(("feature_reduction", PCA(n_components=best_params["PCA__n_components"], random_state=random_state)))
+    elif best_params["feature_step"] == "FeatureSelector":
+        steps.append(("feature_reduction", FeatureSelector(method="top_n_cv", n_features=best_params["FeatureSelector__n_features"])))
+        steps.append(("mean_centering", MeanCenterer()))
+
+    if "SVR__kernel" in best_params:
+        steps.append(("model", SVR(
+            kernel=best_params["SVR__kernel"],
+            C=best_params["SVR__C"],
+            degree=best_params["SVR__degree"],
+#             coef0=best_params["SVR__coef0"],
+            gamma=0.001
+        )))
+    elif "RFR__n_estimators" in best_params:
+        steps.append(("model", RandomForestRegressor(
+            n_estimators=best_params["RFR__n_estimators"],
+            max_features=best_params["RFR__max_features"],
+            max_samples=best_params["RFR__max_samples"],
+            max_depth=best_params["RFR__max_depth"],
+            random_state=random_state,
+            n_jobs=n_cores
+        )))
+
+    best_pipeline = Pipeline(steps)
+    return best_pipeline
 
 
-data_path = '/nobackup/users/hmbaghda/metastatic_potential/'
-random_state = 42
-
-n_cores = 30
-os.environ["OMP_NUM_THREADS"] = str(n_cores)
-os.environ["MKL_NUM_THREADS"] = str(n_cores)
-os.environ["OPENBLAS_NUM_THREADS"] = str(n_cores)
-os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_cores)
-os.environ["NUMEXPR_NUM_THREADS"] = str(n_cores)
-
-
-# In[216]:
+# In[22]:
 
 
 X = pd.read_csv(os.path.join(data_path, 'processed',  'expr.csv'), index_col = 0).T.values
-y = pd.read_csv(os.path.join(data_path, 'processed', 'metastatic_potential.csv'), index_col = 0).values
+y = pd.read_csv(os.path.join(data_path, 'processed', 'metastatic_potential.csv'), index_col = 0).values.ravel()
 
 
-# In[217]:
+# In[23]:
 
 
 outer_folds=10
 inner_folds=5
+n_trials = 150
+
+
+# In[24]:
+
+
+# def optuna_objective_toy(trial, X, y, inner_cv, n_cores, random_state):
+#     # Define feature reduction/selection method
+#     feature_step = trial.suggest_categorical("feature_step", ["PLS", "FeatureSelector"])
+
+#     if feature_step == "PLS":
+#         steps = [
+#             ("mean_centering", MeanCenterer()),
+#             ("feature_reduction", PLSRegression_X(n_components=trial.suggest_categorical("PLS__n_components", [2, 3]))),
+#         ]
+#     elif feature_step == "FeatureSelector":
+#         steps = [
+#             ("feature_reduction", FeatureSelector(method="top_n_cv", n_features=trial.suggest_categorical("FeatureSelector__n_features", [5,10]))),
+#             ("mean_centering", MeanCenterer()),
+#         ]
+#     # Define model
+#     model_type = trial.suggest_categorical("model_type", ["SVR", "RFR"])
+#     if model_type == "SVR":
+#         steps.append(("model", SVR(
+#             kernel=trial.suggest_categorical("SVR__kernel", ["rbf", "poly"]),
+#             gamma=0.001
+#         )))
+#     elif model_type == "RFR":
+#         steps.append(("model", RandomForestRegressor(
+#             n_estimators=trial.suggest_int("RFR__n_estimators", 5, 7),
+#             random_state=random_state,
+#             n_jobs=int(n_cores/inner_cv.n_splits)
+#         )))
+
+#     # Create the pipeline
+#     pipeline = Pipeline(steps)
+
+#     # Evaluate with cross-validation
+#     mse = -cross_val_score(pipeline, X, y, 
+#                            cv=inner_cv, 
+#                            scoring="neg_mean_squared_error", 
+#                            n_jobs=inner_cv.n_splits).mean()
+
+#     return mse
+
+
+# def generate_best_pipeline_toy(study):
+#     best_params = study.best_params
+#     steps = []
+#     if best_params["feature_step"] == "PLS":
+#         steps.append(("mean_centering", MeanCenterer()))
+#         steps.append(("feature_reduction", PLSRegression_X(n_components=best_params["PLS__n_components"])))
+#     elif best_params["feature_step"] == "FeatureSelector":
+#         steps.append(("feature_reduction", FeatureSelector(method="top_n_cv", n_features=best_params["FeatureSelector__n_features"])))
+#         steps.append(("mean_centering", MeanCenterer()))
+
+#     if "SVR__kernel" in best_params:
+#         steps.append(("model", SVR(
+#             kernel=best_params["SVR__kernel"],
+#             gamma=0.001
+#         )))
+#     elif "RFR__n_estimators" in best_params:
+#         steps.append(("model", RandomForestRegressor(
+#             n_estimators=best_params["RFR__n_estimators"],
+#             random_state=random_state,
+#             n_jobs=n_cores
+#         )))
+
+#     best_pipeline = Pipeline(steps)
+#     return best_pipeline
+
+# outer_cv = KFold(n_splits=outer_folds, shuffle=True, random_state=random_state)
+# inner_cv = KFold(n_splits=inner_folds, shuffle=True, random_state=random_state)
+
+# results = []
+# for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
+#     print(str(k))
+#     X_train, X_test = X[train_idx], X[test_idx]
+#     y_train, y_test = y[train_idx], y[test_idx]
+    
+    
+#     pruner = optuna.pruners.SuccessiveHalvingPruner()
+#     study = optuna.create_study(direction="minimize", 
+#                                 sampler=HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler), 
+#                                pruner = pruner, 
+#                                study_name = '{}_optuna'.format(k))
+#     break
+
+
+# In[25]:
+
+
+cmaes_sampler = CmaEsSampler(seed=random_state, warn_independent_sampling=False)
+tpe_sampler = TPESampler(seed=random_state)
 
 
 # In[ ]:
 
 
-mse_scorer = make_scorer(mean_squared_error, greater_is_better=False)
 outer_cv = KFold(n_splits=outer_folds, shuffle=True, random_state=random_state)
 inner_cv = KFold(n_splits=inner_folds, shuffle=True, random_state=random_state)
-feature_reduction, feature_reduction_params, models, model_params = create_pipeline(n_cores, random_state)
-
 
 results = []
-for feature_step, feature_params in zip(feature_reduction, feature_reduction_params):
-    for model_step, model_param in zip(models, model_params):
+for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
+    print(str(k))
+    X_train, X_test = X[train_idx], X[test_idx]
+    y_train, y_test = y[train_idx], y[test_idx]
+    
+    
+    pruner = optuna.pruners.SuccessiveHalvingPruner()
+    study = optuna.create_study(direction="minimize", 
+                                sampler=HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler), 
+                               pruner = pruner, 
+                               study_name = '{}_optuna'.format(k))
+    study.optimize(
+        lambda trial: optuna_objective(trial, X_train, y_train, inner_cv, n_cores, random_state),
+        n_trials=n_trials, 
+        catch=(ValueError,)
+    )
+    write_pickled_object(study, os.path.join(data_path, 'interim', study.study_name + '.pickle'))
         
-        # set up pipeline
-        steps = []
-        if feature_step[0] in ['PLS', 'PCA']:
-            steps.append(('mean_centering', MeanCenterer()))
-            steps.append(feature_step)
-        elif feature_step[0] == 'FeatureSelector':
-            steps.append(feature_step)
-            steps.append(('mean_centering', MeanCenterer()))
+    best_pipeline = generate_best_pipeline(study)
+    best_pipeline.fit(X_train, y_train)
 
-        steps.append(model_step)
+    y_train_pred = best_pipeline.predict(X_train)
+    y_test_pred = best_pipeline.predict(X_test)
 
-        pipeline = Pipeline(steps)
+    train_corr = pearsonr(y_train, y_train_pred)[0]
+    test_corr = pearsonr(y_test, y_test_pred)[0]
 
-        param_grid = {**feature_params}
-        param_grid.update({k: v for k, v in model_param.items()})
-
-
-
-        grid = GridSearchCV(pipeline, param_grid, cv=inner_cv, 
-                            return_train_score = True,
-                            scoring=mse_scorer, n_jobs=n_cores)
-        for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
-            print('feature: ' + feature_step[0] + ' | ' + 'model: ' + model_step[0] + ' | k: {}'.format(k))
-            X_train, X_test = X[train_idx], X[test_idx]
-            y_train, y_test = y[train_idx], y[test_idx]
-
-            grid.fit(X_train, y_train)
-            best_model = grid.best_estimator_
-
-            y_train_pred = best_model.predict(X_train)
-            y_test_pred = best_model.predict(X_test)
-
-            train_corr = pearsonr(y_train, y_train_pred)[0]
-            test_corr = pearsonr(y_test, y_test_pred)[0]
-
-            results.append({
-                'outer_fold': k,
-                'feature_selection': feature_step[0],
-                'model': model_step[0],
-                'train_corr': train_corr,
-                'test_corr': test_corr,
-                'best_params': grid.best_params_,
-                'cv_results': grid.cv_results_
-            })
-            res_df = pd.DataFrame(results)
-            res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline.csv'))
-
-
-# In[211]:
-
-
-
-
-
-# In[208]:
-
-
-k=0
-
-
-# In[ ]:
-
-
-
+    results.append({
+        "fold": k,
+        "train_corr": train_corr,
+        "test_corr": test_corr,
+        "best_params": study.best_params,
+        "inner_cv": study.trials_dataframe()
+        })
+    res_df = pd.DataFrame(results)
+    res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline.csv'))
 
