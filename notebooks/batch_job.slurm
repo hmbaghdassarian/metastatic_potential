@@ -1,9 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=MP_hp_da
-#SBATCH --output MP_hp_hda_%j.out
-#SBATCH -e MP_hp_hda_%j.err
-#SBATCH --mail-user=hmbaghda@mit.edu
-#SBATCH --mail-type=ALL
+#SBATCH --job-name=MP_hp
+#SBATCH --output MP_hp_%j.out
+#SBATCH -e MP_hp_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1

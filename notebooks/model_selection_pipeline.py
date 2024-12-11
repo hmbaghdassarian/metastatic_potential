@@ -3,7 +3,7 @@
 
 # To do: load in non feature selected, non mean-centered data
 
-# In[17]:
+# In[109]:
 
 
 import os
@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 import optuna
-from optuna.samplers import CmaEsSampler, TPESampler
+from optuna.samplers import CmaEsSampler, TPESampler, RandomSampler
 from optuna.distributions import CategoricalDistribution
 
 from sklearn.model_selection import GridSearchCV, cross_val_score, KFold
@@ -30,7 +30,7 @@ from scipy.stats import pearsonr
 from sklearn.utils import shuffle
 
 
-# In[18]:
+# In[110]:
 
 
 data_path = '/nobackup/users/hmbaghda/metastatic_potential/'
@@ -44,7 +44,7 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_cores)
 os.environ["NUMEXPR_NUM_THREADS"] = str(n_cores)
 
 
-# In[19]:
+# In[111]:
 
 
 def write_pickled_object(object_, file_name: str) -> None:
@@ -59,7 +59,7 @@ def write_pickled_object(object_, file_name: str) -> None:
         pickle.dump(object_, handle)
 
 
-# In[20]:
+# In[112]:
 
 
 # Feature selection transformer
@@ -99,7 +99,7 @@ class PLSRegression_X(PLSRegression):
         return X_transformed
 
 
-# In[21]:
+# In[118]:
 
 
 class HybridSampler(optuna.samplers.BaseSampler):
@@ -122,6 +122,18 @@ class HybridSampler(optuna.samplers.BaseSampler):
         # Default to the primary sampler
         return self.primary_sampler.sample_independent(study, trial, param_name, param_distribution)
 
+class RandomTPESampler(TPESampler):
+    def __init__(self, exploration_sampler, exploration_freq=20, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.exploration_sampler = exploration_sampler
+        self.exploration_freq = exploration_freq
+
+    def sample_independent(self, study, trial, param_name, param_distribution):
+        # Use the exploration_sampler periodically
+        if trial.number % self.exploration_freq == 0:
+            return self.exploration_sampler.sample_independent(study, trial, param_name, param_distribution)
+        # Default to TPE
+        return super().sample_independent(study, trial, param_name, param_distribution)
 
 
 def optuna_objective(trial, X, y, inner_cv, n_cores, random_state):
@@ -231,14 +243,14 @@ def generate_best_pipeline(study):
     return best_pipeline
 
 
-# In[22]:
+# In[57]:
 
 
 X = pd.read_csv(os.path.join(data_path, 'processed',  'expr.csv'), index_col = 0).T.values
 y = pd.read_csv(os.path.join(data_path, 'processed', 'metastatic_potential.csv'), index_col = 0).values.ravel()
 
 
-# In[23]:
+# In[119]:
 
 
 outer_folds=10
@@ -246,7 +258,18 @@ inner_folds=5
 n_trials = 150
 
 
-# In[24]:
+# In[124]:
+
+
+# cmaes_sampler = CmaEsSampler(seed=random_state, 
+#                              warn_independent_sampling=False, 
+#                             restart_strategy='bipop')
+
+# exploration_sampler = RandomSampler(seed=random_state)
+# tpe_sampler = RandomTPESampler(seed=random_state, 
+#                                n_startup_trials = 25,
+#                                exploration_sampler = exploration_sampler, 
+#                                exploration_freq=20)
 
 
 # def optuna_objective_toy(trial, X, y, inner_cv, n_cores, random_state):
@@ -314,6 +337,8 @@ n_trials = 150
 #     best_pipeline = Pipeline(steps)
 #     return best_pipeline
 
+# X = np.random.randn(20, 100)
+# y = np.random.randn(20,)
 # outer_cv = KFold(n_splits=outer_folds, shuffle=True, random_state=random_state)
 # inner_cv = KFold(n_splits=inner_folds, shuffle=True, random_state=random_state)
 
@@ -326,17 +351,29 @@ n_trials = 150
     
 #     pruner = optuna.pruners.SuccessiveHalvingPruner()
 #     study = optuna.create_study(direction="minimize", 
-#                                 sampler=HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler), 
+#                                 sampler=PeriodicHybridSampler(primary_sampler=cmaes_sampler, 
+#                                                               fallback_sampler=tpe_sampler, 
+#                                                              exploration_sampler=exploration_sampler, ), 
 #                                pruner = pruner, 
 #                                study_name = '{}_optuna'.format(k))
 #     break
 
 
-# In[25]:
+# In[115]:
 
 
-cmaes_sampler = CmaEsSampler(seed=random_state, warn_independent_sampling=False)
-tpe_sampler = TPESampler(seed=random_state)
+cmaes_sampler = CmaEsSampler(seed=random_state, 
+                             warn_independent_sampling=False, 
+                            restart_strategy='bipop')
+
+exploration_sampler = RandomSampler(seed=random_state)
+tpe_sampler = RandomTPESampler(seed=random_state, 
+                               n_startup_trials = 25,
+                               exploration_sampler = exploration_sampler, 
+                               exploration_freq=20 # randomly sample every n trials
+                              )
+# tpe_sampler = TPESampler(seed=random_state, 
+#                         n_startup_trials = 20)
 
 
 # In[ ]:
@@ -382,4 +419,61 @@ for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
         })
     res_df = pd.DataFrame(results)
     res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline.csv'))
+
+
+# # Start
+
+# In[43]:
+
+
+# steps = [
+#     ("mean_centering", MeanCenterer()),
+#     ("feature_reduction", PLSRegression_X(n_components=10)),
+# ]
+# steps.append(("model", RandomForestRegressor(
+#     n_estimators=300,
+#     max_features='sqrt',
+#     max_samples=None,
+#     max_depth=25,
+#     random_state=random_state,
+#     n_jobs=n_cores
+# )))
+# best_pipeline = Pipeline(steps)
+
+
+# In[44]:
+
+
+# best_pipeline.fit(X_train, y_train)
+
+# y_train_pred = best_pipeline.predict(X_train)
+# y_test_pred = best_pipeline.predict(X_test)
+
+# train_corr = pearsonr(y_train, y_train_pred)[0]
+# test_corr = pearsonr(y_test, y_test_pred)[0]
+
+# y_test_pred = pd.cut(y_test_pred, bins=3, labels=['Low', 'Medium', 'High'])
+# y_test = pd.cut(y_test, bins = 3, labels=['Low', 'Medium', 'High'])
+# print(test_corr)
+# print(f1_score(y_test_pred, y_test, average='weighted'))
+# print((1/3) + (test_corr**2))
+
+
+# In[93]:
+
+
+# k = 0
+
+
+# In[95]:
+
+
+# with open(os.path.join(data_path, 'interim', study.study_name + '.pickle'), 'rb') as handle:
+#     study = pickle.load(handle)
+
+
+# In[128]:
+
+
+# study.sampler.primary_sampler
 
