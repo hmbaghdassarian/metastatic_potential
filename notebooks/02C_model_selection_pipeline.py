@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# To do: load in non feature selected, non mean-centered data
-
-# In[109]:
+# In[1]:
 
 
 import os
 import pickle
 import pathlib
+
+from tqdm import tqdm
 
 import numpy as np
 import pandas as pd
@@ -18,10 +18,12 @@ from optuna.samplers import CmaEsSampler, TPESampler, RandomSampler
 from optuna.distributions import CategoricalDistribution
 
 from sklearn.model_selection import GridSearchCV, cross_val_score, KFold
+from sklearn.feature_selection import SelectFromModel
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cross_decomposition import PLSRegression
+from sklearn.linear_model import ElasticNet
 from sklearn.svm import SVR
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -30,11 +32,11 @@ from scipy.stats import pearsonr
 from sklearn.utils import shuffle
 
 
-# In[110]:
+# In[2]:
 
 
 data_path = '/nobackup/users/hmbaghda/metastatic_potential/'
-random_state = 42
+random_state = 42 + 1
 
 n_cores = 80
 os.environ["OMP_NUM_THREADS"] = str(n_cores)
@@ -44,7 +46,7 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_cores)
 os.environ["NUMEXPR_NUM_THREADS"] = str(n_cores)
 
 
-# In[111]:
+# In[3]:
 
 
 def write_pickled_object(object_, file_name: str) -> None:
@@ -59,7 +61,7 @@ def write_pickled_object(object_, file_name: str) -> None:
         pickle.dump(object_, handle)
 
 
-# In[112]:
+# In[4]:
 
 
 # Feature selection transformer
@@ -99,7 +101,7 @@ class PLSRegression_X(PLSRegression):
         return X_transformed
 
 
-# In[118]:
+# In[5]:
 
 
 class HybridSampler(optuna.samplers.BaseSampler):
@@ -138,23 +140,43 @@ class RandomTPESampler(TPESampler):
 
 def optuna_objective(trial, X, y, inner_cv, n_cores, random_state):
     # Define feature reduction/selection method
-    feature_step = trial.suggest_categorical("feature_step", ["PLS", "PCA", "FeatureSelector"])
-
-    if feature_step == "PLS":
+    feature_step = trial.suggest_categorical("feature_step", ["PLS", "PCA", 'ElasticNet', "FeatureSelector"])
+    
+#     feature_reduction_map = {
+#         'PLS': PLSRegression_X(n_components=trial.suggest_categorical("PLS__n_components", [2, 5, 10, 25, 50, 100])), 
+#         'PCA': PCA(n_components=trial.suggest_categorical("PCA__n_components", [2, 5, 10, 25, 50, 100]), random_state=random_state),
+#         'Ridge': Ridge(alpha=trial.suggest_float("Ridge__alpha", 1e-3, 1e3, log = True), random_state=random_state)
+#     }
+   
+#     if feature_step in ['PLS', 'PCA', 'Ridge']:
+#         steps = [
+#             ("mean_centering", MeanCenterer()), 
+#             ("feature_reduction", feature_reduction_map[feature_step]), 
+#         ]
+    if feature_step == 'PLS':
         steps = [
-            ("mean_centering", MeanCenterer()),
-            ("feature_reduction", PLSRegression_X(n_components=trial.suggest_categorical("PLS__n_components", [2, 5, 10, 25, 50, 100]))),
+            ("mean_centering", MeanCenterer()), 
+            ("feature_reduction", PLSRegression_X(n_components=trial.suggest_categorical("PLS__n_components", [2, 5, 10, 25, 50, 100]))), 
         ]
-    elif feature_step == "PCA":
+    elif feature_step == 'PCA':
         steps = [
-            ("mean_centering", MeanCenterer()),
-            ("feature_reduction", PCA(n_components=trial.suggest_categorical("PCA__n_components", [2, 5, 10, 25, 50, 100]), random_state=random_state)),
+            ("mean_centering", MeanCenterer()), 
+            ("feature_reduction", PCA(n_components=trial.suggest_categorical("PCA__n_components", [2, 5, 10, 25, 50, 100]), random_state=random_state)), 
+        ]
+    elif feature_step == 'ElasticNet':
+        steps = [
+            ("mean_centering", MeanCenterer()), 
+            ("feature_reduction", SelectFromModel(ElasticNet(alpha=trial.suggest_float("ElasticNet__alpha", 1e-3, 1e3, log = True), 
+                                             l1_ratio=trial.suggest_float("ElasticNet__l1_ratio", 1e-5, 1e-1, log=True), # since ridge performed well
+                                             random_state=random_state))), 
         ]
     elif feature_step == "FeatureSelector":
         steps = [
-            ("feature_reduction", FeatureSelector(method="top_n_cv", n_features=trial.suggest_categorical("FeatureSelector__n_features", [250, 500, 1000, 5000, 17879]))),
+            ("feature_reduction", FeatureSelector(method="top_n_cv", 
+                                                  n_features=trial.suggest_categorical("FeatureSelector__n_features", [250, 500, 1000, 5000, 19138]))),
             ("mean_centering", MeanCenterer()),
         ]
+
     # Define model
     model_type = trial.suggest_categorical("model_type", ["SVR", "RFR"])
     if model_type == "SVR":
@@ -217,6 +239,11 @@ def generate_best_pipeline(study):
     elif best_params["feature_step"] == "PCA":
         steps.append(("mean_centering", MeanCenterer()))
         steps.append(("feature_reduction", PCA(n_components=best_params["PCA__n_components"], random_state=random_state)))
+    elif best_params["feature_step"] == "ElasticNet":
+        steps.append(("mean_centering", MeanCenterer()))
+        steps.append(("feature_reduction", SelectFromModel(ElasticNet(alpha=best_params["ElasticNet__alpha"], 
+                                                      l1_ratio=best_params["ElasticNet__l1_ratio"],
+                                                      random_state=random_state))))
     elif best_params["feature_step"] == "FeatureSelector":
         steps.append(("feature_reduction", FeatureSelector(method="top_n_cv", n_features=best_params["FeatureSelector__n_features"])))
         steps.append(("mean_centering", MeanCenterer()))
@@ -243,14 +270,14 @@ def generate_best_pipeline(study):
     return best_pipeline
 
 
-# In[57]:
+# In[6]:
 
 
-X = pd.read_csv(os.path.join(data_path, 'processed',  'expr.csv'), index_col = 0).T.values
-y = pd.read_csv(os.path.join(data_path, 'processed', 'metastatic_potential.csv'), index_col = 0).values.ravel()
+X = pd.read_csv(os.path.join(data_path, 'processed',  'expr.csv'), index_col = 0).values
+y = pd.read_csv(os.path.join(data_path, 'processed', 'metastatic_potential.csv'), index_col = 0)['mean'].values.ravel()
 
 
-# In[119]:
+# In[7]:
 
 
 outer_folds=10
@@ -258,108 +285,7 @@ inner_folds=5
 n_trials = 150
 
 
-# In[124]:
-
-
-# cmaes_sampler = CmaEsSampler(seed=random_state, 
-#                              warn_independent_sampling=False, 
-#                             restart_strategy='bipop')
-
-# exploration_sampler = RandomSampler(seed=random_state)
-# tpe_sampler = RandomTPESampler(seed=random_state, 
-#                                n_startup_trials = 25,
-#                                exploration_sampler = exploration_sampler, 
-#                                exploration_freq=20)
-
-
-# def optuna_objective_toy(trial, X, y, inner_cv, n_cores, random_state):
-#     # Define feature reduction/selection method
-#     feature_step = trial.suggest_categorical("feature_step", ["PLS", "FeatureSelector"])
-
-#     if feature_step == "PLS":
-#         steps = [
-#             ("mean_centering", MeanCenterer()),
-#             ("feature_reduction", PLSRegression_X(n_components=trial.suggest_categorical("PLS__n_components", [2, 3]))),
-#         ]
-#     elif feature_step == "FeatureSelector":
-#         steps = [
-#             ("feature_reduction", FeatureSelector(method="top_n_cv", n_features=trial.suggest_categorical("FeatureSelector__n_features", [5,10]))),
-#             ("mean_centering", MeanCenterer()),
-#         ]
-#     # Define model
-#     model_type = trial.suggest_categorical("model_type", ["SVR", "RFR"])
-#     if model_type == "SVR":
-#         steps.append(("model", SVR(
-#             kernel=trial.suggest_categorical("SVR__kernel", ["rbf", "poly"]),
-#             gamma=0.001
-#         )))
-#     elif model_type == "RFR":
-#         steps.append(("model", RandomForestRegressor(
-#             n_estimators=trial.suggest_int("RFR__n_estimators", 5, 7),
-#             random_state=random_state,
-#             n_jobs=int(n_cores/inner_cv.n_splits)
-#         )))
-
-#     # Create the pipeline
-#     pipeline = Pipeline(steps)
-
-#     # Evaluate with cross-validation
-#     mse = -cross_val_score(pipeline, X, y, 
-#                            cv=inner_cv, 
-#                            scoring="neg_mean_squared_error", 
-#                            n_jobs=inner_cv.n_splits).mean()
-
-#     return mse
-
-
-# def generate_best_pipeline_toy(study):
-#     best_params = study.best_params
-#     steps = []
-#     if best_params["feature_step"] == "PLS":
-#         steps.append(("mean_centering", MeanCenterer()))
-#         steps.append(("feature_reduction", PLSRegression_X(n_components=best_params["PLS__n_components"])))
-#     elif best_params["feature_step"] == "FeatureSelector":
-#         steps.append(("feature_reduction", FeatureSelector(method="top_n_cv", n_features=best_params["FeatureSelector__n_features"])))
-#         steps.append(("mean_centering", MeanCenterer()))
-
-#     if "SVR__kernel" in best_params:
-#         steps.append(("model", SVR(
-#             kernel=best_params["SVR__kernel"],
-#             gamma=0.001
-#         )))
-#     elif "RFR__n_estimators" in best_params:
-#         steps.append(("model", RandomForestRegressor(
-#             n_estimators=best_params["RFR__n_estimators"],
-#             random_state=random_state,
-#             n_jobs=n_cores
-#         )))
-
-#     best_pipeline = Pipeline(steps)
-#     return best_pipeline
-
-# X = np.random.randn(20, 100)
-# y = np.random.randn(20,)
-# outer_cv = KFold(n_splits=outer_folds, shuffle=True, random_state=random_state)
-# inner_cv = KFold(n_splits=inner_folds, shuffle=True, random_state=random_state)
-
-# results = []
-# for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
-#     print(str(k))
-#     X_train, X_test = X[train_idx], X[test_idx]
-#     y_train, y_test = y[train_idx], y[test_idx]
-    
-    
-#     pruner = optuna.pruners.SuccessiveHalvingPruner()
-#     study = optuna.create_study(direction="minimize", 
-#                                 sampler=PeriodicHybridSampler(primary_sampler=cmaes_sampler, 
-#                                                               fallback_sampler=tpe_sampler, 
-#                                                              exploration_sampler=exploration_sampler, ), 
-#                                pruner = pruner, 
-#                                study_name = '{}_optuna'.format(k))
-#     break
-
-
-# In[115]:
+# In[8]:
 
 
 cmaes_sampler = CmaEsSampler(seed=random_state, 
@@ -376,104 +302,57 @@ tpe_sampler = RandomTPESampler(seed=random_state,
 #                         n_startup_trials = 20)
 
 
-# In[ ]:
+# In[13]:
 
 
 outer_cv = KFold(n_splits=outer_folds, shuffle=True, random_state=random_state)
 inner_cv = KFold(n_splits=inner_folds, shuffle=True, random_state=random_state)
 
-results = []
+if os.path.isfile(os.path.join(data_path, 'interim', 'pipeline_feature_selection.csv')):
+    res_df = pd.read_csv(os.path.join(data_path, 'interim', 'pipeline_feature_selection.csv'), 
+                     index_col = 0)
+    results = res_df.to_dict(orient='records')
+else:
+    results = []
+    res_df = None
+    
 for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
-    print(str(k))
-    X_train, X_test = X[train_idx], X[test_idx]
-    y_train, y_test = y[train_idx], y[test_idx]
-    
-    
-    pruner = optuna.pruners.SuccessiveHalvingPruner()
-    study = optuna.create_study(direction="minimize", 
-                                sampler=HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler), 
-                               pruner = pruner, 
-                               study_name = '{}_optuna'.format(k))
-    study.optimize(
-        lambda trial: optuna_objective(trial, X_train, y_train, inner_cv, n_cores, random_state),
-        n_trials=n_trials, 
-        catch=(ValueError,)
-    )
-    write_pickled_object(study, os.path.join(data_path, 'interim', study.study_name + '.pickle'))
-        
-    best_pipeline = generate_best_pipeline(study)
-    best_pipeline.fit(X_train, y_train)
-
-    y_train_pred = best_pipeline.predict(X_train)
-    y_test_pred = best_pipeline.predict(X_test)
-
-    train_corr = pearsonr(y_train, y_train_pred)[0]
-    test_corr = pearsonr(y_test, y_test_pred)[0]
-
-    results.append({
-        "fold": k,
-        "train_corr": train_corr,
-        "test_corr": test_corr,
-        "best_params": study.best_params,
-        "inner_cv": study.trials_dataframe()
-        })
-    res_df = pd.DataFrame(results)
-    res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline.csv'))
+    if res_df is not None and res_df[res_df.fold == k].shape[0] != 0:
+        pass
+    else:
+        print(str(k))
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
 
 
-# # Start
+        pruner = optuna.pruners.SuccessiveHalvingPruner()
+        study = optuna.create_study(direction="minimize", 
+                                    sampler=HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler), 
+                                   pruner = pruner, 
+                                   study_name = '{}_optuna'.format(k))
+        study.optimize(
+            lambda trial: optuna_objective(trial, X_train, y_train, inner_cv, n_cores, random_state),
+            n_trials=n_trials, 
+            catch=(ValueError,)
+        )
+        write_pickled_object(study, os.path.join(data_path, 'interim', study.study_name + '.pickle'))
 
-# In[43]:
+        best_pipeline = generate_best_pipeline(study)
+        best_pipeline.fit(X_train, y_train)
 
+        y_train_pred = best_pipeline.predict(X_train)
+        y_test_pred = best_pipeline.predict(X_test)
 
-# steps = [
-#     ("mean_centering", MeanCenterer()),
-#     ("feature_reduction", PLSRegression_X(n_components=10)),
-# ]
-# steps.append(("model", RandomForestRegressor(
-#     n_estimators=300,
-#     max_features='sqrt',
-#     max_samples=None,
-#     max_depth=25,
-#     random_state=random_state,
-#     n_jobs=n_cores
-# )))
-# best_pipeline = Pipeline(steps)
+        train_corr = pearsonr(y_train, y_train_pred)[0]
+        test_corr = pearsonr(y_test, y_test_pred)[0]
 
-
-# In[44]:
-
-
-# best_pipeline.fit(X_train, y_train)
-
-# y_train_pred = best_pipeline.predict(X_train)
-# y_test_pred = best_pipeline.predict(X_test)
-
-# train_corr = pearsonr(y_train, y_train_pred)[0]
-# test_corr = pearsonr(y_test, y_test_pred)[0]
-
-# y_test_pred = pd.cut(y_test_pred, bins=3, labels=['Low', 'Medium', 'High'])
-# y_test = pd.cut(y_test, bins = 3, labels=['Low', 'Medium', 'High'])
-# print(test_corr)
-# print(f1_score(y_test_pred, y_test, average='weighted'))
-# print((1/3) + (test_corr**2))
-
-
-# In[93]:
-
-
-# k = 0
-
-
-# In[95]:
-
-
-# with open(os.path.join(data_path, 'interim', study.study_name + '.pickle'), 'rb') as handle:
-#     study = pickle.load(handle)
-
-
-# In[128]:
-
-
-# study.sampler.primary_sampler
+        results.append({
+            "fold": k,
+            "train_corr": train_corr,
+            "test_corr": test_corr,
+            "best_params": study.best_params,
+            "inner_cv": study.trials_dataframe()
+            })
+        res_df = pd.DataFrame(results)
+        res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline_feature_selection.csv'))
 

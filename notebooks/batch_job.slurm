@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=MP_hp
-#SBATCH --output MP_hp_%j.out
-#SBATCH -e MP_hp_%j.err
+#SBATCH --job-name=02Aiii
+#SBATCH --output 02Aiii_%j.out
+#SBATCH -e 02Aiii_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
@@ -16,5 +16,5 @@ CONDA_PATH="/nobackup/users/hmbaghda/Software/miniforge3/"
 echo "start"
 source ${CONDA_PATH}/etc/profile.d/conda.sh
 conda activate $ENV_NAME
-python model_selection_pipeline.py
+python 02Aiii_model_selection_joint.py
 echo "complete"
