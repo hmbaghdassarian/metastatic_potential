@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=02Aiii
-#SBATCH --output 02Aiii_%j.out
-#SBATCH -e 02Aiii_%j.err
+#SBATCH --job-name=02Biii
+#SBATCH --output 02Biii_%j.out
+#SBATCH -e 02Biii_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
@@ -16,5 +16,5 @@ CONDA_PATH="/nobackup/users/hmbaghda/Software/miniforge3/"
 echo "start"
 source ${CONDA_PATH}/etc/profile.d/conda.sh
 conda activate $ENV_NAME
-python 02Aiii_model_selection_joint.py
+python 02Biii_model_selection_joint.py
 echo "complete"

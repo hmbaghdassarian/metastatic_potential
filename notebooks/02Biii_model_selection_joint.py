@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[1]:
+# In[24]:
 
 
 import os
@@ -19,7 +19,7 @@ from optuna.distributions import CategoricalDistribution
 
 from sklearn.model_selection import GridSearchCV, cross_val_score, KFold
 from sklearn.feature_selection import SelectFromModel
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import Pipeline, FeatureUnion
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.cross_decomposition import PLSRegression
@@ -32,7 +32,7 @@ from scipy.stats import pearsonr
 from sklearn.utils import shuffle
 
 
-# In[2]:
+# In[25]:
 
 
 data_path = '/nobackup/users/hmbaghda/metastatic_potential/'
@@ -46,7 +46,7 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_cores)
 os.environ["NUMEXPR_NUM_THREADS"] = str(n_cores)
 
 
-# In[3]:
+# In[26]:
 
 
 def write_pickled_object(object_, file_name: str) -> None:
@@ -61,7 +61,7 @@ def write_pickled_object(object_, file_name: str) -> None:
         pickle.dump(object_, handle)
 
 
-# In[4]:
+# In[27]:
 
 
 # Feature selection transformer
@@ -92,16 +92,44 @@ class MeanCenterer(TransformerMixin, BaseEstimator):
     
 def pearson_corr_scorer(y_true, y_pred):
     return pearsonr(y_true, y_pred)[0]
+    
+class ModalitySelector(BaseEstimator, TransformerMixin):
+    def __init__(self, modality):
+        if modality not in ['protein', 'rna']:
+            raise ValueError("modality must be 'protein' or 'rna'")
+        self.modality = modality
 
-class PLSRegression_X(PLSRegression):
-    def transform(self, X, y=None):
-        X_transformed = super().transform(X, y)
-        if isinstance(X_transformed, tuple):
-            X_transformed = X_transformed[0]
-        return X_transformed
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        # X is expected to be a tuple: (X_protein, X_rna)
+        if self.modality == 'protein':
+            return X[0]  # Return X_protein
+        elif self.modality == 'rna':
+            return X[1]  # Return X_rna
+        
+
+# class TupleCV:
+#     def __init__(self, base_cv):
+#         self.base_cv = base_cv
+
+#     def split(self, X, y=None):
+#         if not isinstance(X, tuple):
+#             raise ValueError("Input to TupleCV must be a tuple (X_protein, X_rna).")
+#         X_protein, X_rna = X
+#         for train_idx, test_idx in self.base_cv.split(X_protein, y):  # Use X_protein for indexing
+#             # Yield consistent splits for both modalities
+#             yield (
+#                 (X_protein[train_idx], X_rna[train_idx]),  # Training data tuple
+#                 (X_protein[test_idx], X_rna[test_idx]),    # Testing data tuple
+#             ), (y[train_idx], y[test_idx])  # Training and testing targets
+
+#     def get_n_splits(self, X=None, y=None):
+#         return self.base_cv.get_n_splits()
 
 
-# In[5]:
+# In[28]:
 
 
 class HybridSampler(optuna.samplers.BaseSampler):
@@ -138,115 +166,119 @@ class RandomTPESampler(TPESampler):
         return super().sample_independent(study, trial, param_name, param_distribution)
 
 
-def optuna_objective(trial, X, y, inner_cv, n_cores, random_state):
-    # Define feature reduction/selection method
-        
+def optuna_objective(trial, X_protein, X_rna, y, inner_folds, #inner_cv, 
+                     n_cores, random_state):
+    # Suggest parameters for feature selection
+    n_features_protein = trial.suggest_categorical("FeatureSelector__n_features_protein", [250, 500, 1000, 5000, X_protein.shape[1]])
+    n_features_rna = trial.suggest_categorical("FeatureSelector__n_features_rna", [250, 500, 1000, 5000, X_rna.shape[1]])
+
+    # Protein-specific pipeline
+    protein_pipeline = Pipeline([
+        ("select_protein", ModalitySelector(modality="protein")),
+        ("feature_selection_protein", FeatureSelector(method="top_n_cv", n_features=n_features_protein)),
+        ("mean_centering_protein", MeanCenterer()),  # Mean centering for protein data
+    ])
+
+    # RNA-specific pipeline
+    rna_pipeline = Pipeline([
+        ("select_rna", ModalitySelector(modality="rna")),
+        ("feature_selection_rna", FeatureSelector(method="top_n_cv", n_features=n_features_rna)),
+        ("mean_centering_rna", MeanCenterer()),  # Mean centering for RNA data
+    ])
+
+    # Combine both pipelines
+    combined_pipeline = FeatureUnion([
+        ("protein_pipeline", protein_pipeline),
+        ("rna_pipeline", rna_pipeline),
+    ])
+
+    # Add the model
     steps = [
-        ("feature_reduction", FeatureSelector(method="top_n_cv", 
-                                              n_features=trial.suggest_categorical("FeatureSelector__n_features", [250, 500, 1000, 5000, 12755]))),
-        ("mean_centering", MeanCenterer()),
+        ("feature_processing", combined_pipeline),
     ]
 
+    steps.append(("model", SVR(
+        kernel='linear',
+        C=trial.suggest_float("SVR__C", 1e-4, 1e2, log=True),
+        epsilon=trial.suggest_float("SVR__epsilon", 1e-3, 10, log=True)
+    )))
 
-    # Define model
-    model_type = trial.suggest_categorical("model_type", ["SVR", 'PLS', 'Ridge'])
-    if model_type == "SVR":
-        steps.append(("model", SVR(
-            kernel='linear',
-            C=trial.suggest_float("SVR__C", 1e-4, 1e2, log = True),
-            epsilon=trial.suggest_float("SVR__epsilon", 1e-3, 10, log=True)
-        )))
-#     elif model_type == "RFR":
-#         steps.append(("model", RandomForestRegressor(
-#             n_estimators=trial.suggest_int("RFR__n_estimators", 300, 1600, step=400),
-#             max_features=trial.suggest_categorical("RFR__max_features", ["sqrt", "log2", 0.5, 0.75, 1]),
-#             max_samples=trial.suggest_categorical("RFR__max_samples", [0.25, 0.5, 0.75, None]),
-#             max_depth=trial.suggest_categorical("RFR__max_depth", [None, 10, 25, 50, 100, 200]),
-#             random_state=random_state,
-#             n_jobs=int(n_cores/inner_cv.n_splits)
-#         )))
-    elif model_type == 'PLS':
-        steps.append(
-            ("model", PLSRegression_X(n_components=trial.suggest_int("PLS__n_components", 2, 100, step = 3))), 
-        )
-    elif model_type == 'Ridge':
-        steps.append(
-            ('model', Ridge(alpha=trial.suggest_float("Ridge__alpha", 1, 250, step = 10), 
-                                             random_state=random_state))
-        )
-
-    # Create the pipeline
     pipeline = Pipeline(steps)
 
     # Evaluate with cross-validation
-    mse = -cross_val_score(pipeline, X, y, 
-                           cv=inner_cv, 
-                           scoring="neg_mean_squared_error", 
-                           n_jobs=inner_cv.n_splits).mean()
-
-#     for fold_idx, (train_idx, val_idx) in enumerate(inner_cv.split(X, y)):
-#         X_train, X_val = X[train_idx], X[val_idx]
-#         y_train, y_val = y[train_idx], y[val_idx]
-
-#         # Train and evaluate the pipeline on the current fold
-#         pipeline.fit(X_train, y_train)
-#         y_val_pred = pipeline.predict(X_val)
-#         mse = mean_squared_error(y_val, y_val_pred)
-
-#         # Store the MSE for this fold
-#         mse_scores.append(mse)
-
-#         # Report intermediate result to Optuna
-#         trial.report(np.mean(mse_scores), step=fold_idx)
-
-#         # Check if the trial should be pruned
-#         if trial.should_prune():
-#             raise optuna.exceptions.TrialPruned()
+    X_combined = (X_protein, X_rna)  # Combine datasets as tuple
     
-#     return np.mean(mse_scores)
+    kf = KFold(n_splits=inner_folds, shuffle=True, random_state=random_state)
+    mse_scores = []
 
-    return mse
+    for train_idx, test_idx in kf.split(X_protein):
+        X_train = (X_protein[train_idx], X_rna[train_idx])
+        X_test = (X_protein[test_idx], X_rna[test_idx])
+        y_train, y_test = y[train_idx], y[test_idx]
 
+        # Fit and evaluate the pipeline
+        pipeline.fit(X_train, y_train)
+        y_pred = pipeline.predict(X_test)
+        mse_scores.append(mean_squared_error(y_test, y_pred))
+        
+    return np.mean(mse_scores)
+#     mse = -cross_val_score(pipeline, X_combined, y, 
+#                            cv=inner_cv, 
+#                            scoring="neg_mean_squared_error", 
+#                            n_jobs=n_cores).mean()
+
+#     return mse
 
 def generate_best_pipeline(study):
     best_params = study.best_params
-    steps = []
-    steps.append(("feature_reduction", FeatureSelector(method="top_n_cv", n_features=best_params["FeatureSelector__n_features"])))
-    steps.append(("mean_centering", MeanCenterer()))
-    
-    if "SVR__C" in best_params:
-        steps.append(("model", SVR(
-            kernel='linear',
-            C=best_params["SVR__C"],
-            epsilon=best_params['SVR__epsilon']
-        )))
-#     elif "RFR__n_estimators" in best_params:
-#         steps.append(("model", RandomForestRegressor(
-#             n_estimators=best_params["RFR__n_estimators"],
-#             max_features=best_params["RFR__max_features"],
-#             max_samples=best_params["RFR__max_samples"],
-#             max_depth=best_params["RFR__max_depth"],
-#             random_state=random_state,
-#             n_jobs=n_cores
-#         )))
-    elif 'PLS__n_components' in best_params:
-        steps.append(("model", PLSRegression_X(n_components=best_params["PLS__n_components"])))
-    elif 'Ridge__alpha' in best_params:
-        steps.append(("model", Ridge(alpha=best_params["Ridge__alpha"], 
-                                                      random_state=random_state)))
 
+    # Protein-specific pipeline
+    protein_pipeline = Pipeline([
+        ("select_protein", ModalitySelector(modality="protein")),
+        ("feature_selection_protein", FeatureSelector(method="top_n_cv", n_features=best_params["FeatureSelector__n_features_protein"])),
+        ("mean_centering_protein", MeanCenterer()),  # Mean centering for protein data
+    ])
+
+    # RNA-specific pipeline
+    rna_pipeline = Pipeline([
+        ("select_rna", ModalitySelector(modality="rna")),
+        ("feature_selection_rna", FeatureSelector(method="top_n_cv", n_features=best_params["FeatureSelector__n_features_rna"])),
+        ("mean_centering_rna", MeanCenterer()),  # Mean centering for RNA data
+    ])
+
+    # Combine both pipelines
+    combined_pipeline = FeatureUnion([
+        ("protein_pipeline", protein_pipeline),
+        ("rna_pipeline", rna_pipeline),
+    ])
+
+    # Add the model
+    steps = [
+        ("feature_processing", combined_pipeline),
+    ]
+
+    steps.append(("model", SVR(
+        kernel='linear',
+        C=best_params["SVR__C"],
+        epsilon=best_params['SVR__epsilon']
+    )))
+    
+    # Create the full pipeline
     best_pipeline = Pipeline(steps)
     return best_pipeline
 
 
-# In[10]:
+# In[44]:
 
 
-X = pd.read_csv(os.path.join(data_path, 'processed',  'expr_protein.csv'), index_col = 0).values
-y = pd.read_csv(os.path.join(data_path, 'processed', 'metastatic_potential_protein.csv'), index_col = 0)['mean'].values.ravel()
+X = pd.read_csv(os.path.join(data_path, 'processed',  'expr_joint.csv'), index_col = 0)
+y = pd.read_csv(os.path.join(data_path, 'processed', 'metastatic_potential_joint.csv'), index_col = 0)['mean'].values.ravel()
+
+X_protein = X[[col for col in X if col.startswith('sp')]].values
+X_rna = X[[col for col in X if not col.startswith('sp')]].values
 
 
-# In[11]:
+# In[31]:
 
 
 outer_folds=10
@@ -275,10 +307,10 @@ tpe_sampler = RandomTPESampler(seed=random_state,
 
 
 outer_cv = KFold(n_splits=outer_folds, shuffle=True, random_state=random_state)
-inner_cv = KFold(n_splits=inner_folds, shuffle=True, random_state=random_state)
+# inner_cv = TupleCV(KFold(n_splits=inner_folds, shuffle=True, random_state=random_state))
 
-if os.path.isfile(os.path.join(data_path, 'interim', 'pipeline_model_selection_protein.csv')):
-    res_df = pd.read_csv(os.path.join(data_path, 'interim', 'pipeline_model_selection_protein.csv'), 
+if os.path.isfile(os.path.join(data_path, 'interim', 'pipeline_model_selection_joint.csv')):
+    res_df = pd.read_csv(os.path.join(data_path, 'interim', 'pipeline_model_selection_joint.csv'), 
                      index_col = 0)
     results = res_df.to_dict(orient='records')
 else:
@@ -290,7 +322,8 @@ for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
         pass
     else:
         print(str(k))
-        X_train, X_test = X[train_idx], X[test_idx]
+        X_train_rna, X_test_rna = X_rna[train_idx], X_rna[test_idx]
+        X_train_protein, X_test_protein = X_protein[train_idx], X_protein[test_idx]
         y_train, y_test = y[train_idx], y[test_idx]
 
 
@@ -300,12 +333,16 @@ for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
                                    pruner = pruner, 
                                    study_name = '{}_optuna'.format(k))
         study.optimize(
-            lambda trial: optuna_objective(trial, X_train, y_train, inner_cv, n_cores, random_state),
+            lambda trial: optuna_objective(trial, X_train_protein, X_train_rna, y_train, inner_folds, #inner_cv, 
+                                           n_cores, random_state),
             n_trials=n_trials, 
             catch=(ValueError,)
         )
         write_pickled_object(study, os.path.join(data_path, 'interim', study.study_name + '.pickle'))
 
+        X_train = (X_train_protein, X_train_rna)
+        X_test = (X_test_protein, X_test_rna)
+        
         best_pipeline = generate_best_pipeline(study)
         best_pipeline.fit(X_train, y_train)
 
@@ -323,5 +360,4 @@ for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
             "inner_cv": study.trials_dataframe()
             })
         res_df = pd.DataFrame(results)
-        res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline_model_selection_protein.csv'))
-
+        res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline_model_selection_joint.csv'))
