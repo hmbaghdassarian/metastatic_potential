@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=02Biii
-#SBATCH --output 02Biii_%j.out
-#SBATCH -e 02Biii_%j.err
+#SBATCH --job-name=02B
+#SBATCH --output 02B_%j.out
+#SBATCH -e 02B_%j.err
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --ntasks-per-node=1
