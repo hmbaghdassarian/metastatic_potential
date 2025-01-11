@@ -10,7 +10,7 @@
 # 
 # We then compare the performance as measured by the Pearson correlation of the selected best hyperparameter for each fold across models. 
 
-# In[23]:
+# In[2]:
 
 
 import os
@@ -50,7 +50,7 @@ sys.path.insert(1, '../')
 from utils import FeatureSelector, MeanCenterer
 
 
-# In[15]:
+# In[3]:
 
 
 data_path = '/nobackup/users/hmbaghda/metastatic_potential/'
@@ -64,7 +64,7 @@ os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_cores)
 os.environ["NUMEXPR_NUM_THREADS"] = str(n_cores)
 
 
-# In[16]:
+# In[4]:
 
 
 def pearson_corr_scorer(y_true, y_pred):
@@ -146,7 +146,7 @@ def parallel_kfold_cv(X_protein, X_rna, y, pipeline, inner_folds, random_state, 
     return np.mean(mse_scores)
 
 
-# In[25]:
+# In[5]:
 
 
 def optuna_objective(trial, X_protein, X_rna, y, inner_folds, #inner_cv, 
@@ -189,23 +189,23 @@ def optuna_objective(trial, X_protein, X_rna, y, inner_folds, #inner_cv,
         )))
     elif model_type == 'PLS':
         steps.append(
-            ("model", PLSRegression_X(n_components=trial.suggest_int(model_type + "__n_components", 2, 100, step = 3))), 
+            ("model", PLSRegression_X(n_components=trial.suggest_int(model_type + "__n_components", 2, 100, step = 1))), 
         )
     elif model_type == 'Ridge':
         steps.append(
-            ('model', Ridge(alpha=trial.suggest_float(model_type + "__alpha", 1, 250, step = 10), 
+            ('model', Ridge(alpha=trial.suggest_float(model_type + "__alpha", 1e-3, 1e2, log = True), 
                                              random_state=random_state))
         )
     elif model_type == 'Lasso':
         steps.append(
-            ('model', Lasso(alpha=trial.suggest_float(model_type + "__alpha", 1, 250, step = 10), 
+            ('model', Lasso(alpha=trial.suggest_float(model_type + "__alpha", 1e-3, 1e2, log = True), 
                                              random_state=random_state))
         )
     elif model_type == 'ElasticNet':
         steps.append(
-            ('model', ElasticNet(alpha=trial.suggest_float(model_type + "__alpha", 1, 250, step = 10),
+            ('model', ElasticNet(alpha=trial.suggest_float(model_type + "__alpha", 1e-3, 1e2, log = True),
                                  random_state=random_state, 
-                                l1_ratio = 0.5))
+                                l1_ratio = trial.suggest_float(model_type + "__l1_ratio", 0.3, 0.7, step = 0.1)))
         )
     elif model_type == "SVR_poly":
         steps.append(("model", SVR(
@@ -324,7 +324,7 @@ def generate_best_pipeline(study, model_type):
         steps.append(
             ('model', ElasticNet(alpha=best_params[model_type + '__alpha'],
                                  random_state=random_state, 
-                                l1_ratio = 0.5))
+                                l1_ratio = best_params[model_type + '__l1_ratio']))
         )
     elif model_type == "SVR_poly":
         steps.append(("model", SVR(
@@ -374,7 +374,7 @@ def generate_best_pipeline(study, model_type):
     return best_pipeline
 
 
-# In[18]:
+# In[6]:
 
 
 X = pd.read_csv(os.path.join(data_path, 'processed',  'expr_joint.csv'), index_col = 0)
@@ -390,7 +390,7 @@ X_protein = X[protein_cols].values
 X_rna = X[rna_cols].values
 
 
-# In[28]:
+# In[7]:
 
 
 outer_folds=10
@@ -398,7 +398,7 @@ inner_folds=5
 n_trials = 100
 
 
-# In[29]:
+# In[8]:
 
 
 cmaes_sampler = CmaEsSampler(seed=random_state, 
@@ -415,75 +415,69 @@ tpe_sampler = RandomTPESampler(seed=random_state,
 #                         n_startup_trials = 20)
 
 
-# In[33]:
+# In[1]:
 
 
 outer_cv = KFold(n_splits=outer_folds, shuffle=True, random_state=random_state)
 # inner_cv = TupleCV(KFold(n_splits=inner_folds, shuffle=True, random_state=random_state))
 
-# if os.path.isfile(os.path.join(data_path, 'interim', 'pipeline_model_selection_individual.csv')):
-#     res_df = pd.read_csv(os.path.join(data_path, 'interim', 'pipeline_model_selection_individual.csv'), 
-#                      index_col = 0)
-#     results = res_df.to_dict(orient='records')
-# else:
-results = []
-res_df = None
+if os.path.isfile(os.path.join(data_path, 'interim', 'pipeline_model_selection_joint_individual.csv')):
+    res_df = pd.read_csv(os.path.join(data_path, 'interim', 'pipeline_model_selection_joint_individual.csv'), 
+                     index_col = 0)
+    results = res_df.to_dict(orient='records')
+else:
+    results = []
+    res_df = None
     
 for model_type in ['SVR_linear', 'PLS', 'Ridge', 'Lasso', 'ElasticNet', 
-                   'SVR_poly', 'SVR_rbf', 'RFR', 'XGBoost', 'KNN']:
+                   'SVR_poly', 'SVR_rbf', 'RFR', 'KNN']:#'XGBoost', ]:
     for k, (train_idx, test_idx) in enumerate(outer_cv.split(X, y)):
-    #     if res_df is not None and res_df[res_df.fold == k].shape[0] != 0:
-    #         pass
-    #     else:
-        print(str(k))
-        X_train_rna, X_test_rna = X_rna[train_idx], X_rna[test_idx]
-        X_train_protein, X_test_protein = X_protein[train_idx], X_protein[test_idx]
-        y_train, y_test = y[train_idx], y[test_idx]
+        if res_df is not None and res_df[(res_df.fold == k) & (res_df.model_type == model_type)].shape[0] != 0:
+            pass
+        else:
+            print(model_type + ': ' + str(k))
+            X_train_rna, X_test_rna = X_rna[train_idx], X_rna[test_idx]
+            X_train_protein, X_test_protein = X_protein[train_idx], X_protein[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
 
 
-        pruner = optuna.pruners.SuccessiveHalvingPruner()
-        study = optuna.create_study(direction="minimize", 
-                                    sampler=HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler), 
-                                   pruner = pruner, 
-                                   study_name = '{}_optuna'.format(k))
-        study.optimize(
-            lambda trial: optuna_objective(trial, X_train_protein, X_train_rna, y_train, inner_folds, #inner_cv, 
-                                           n_cores, random_state, model_type),
-            n_trials=n_trials, 
-            catch=(ValueError,)
-        )
-#         write_pickled_object(study, os.path.join(data_path, 'interim', study.study_name + '.pickle'))
+            pruner = optuna.pruners.SuccessiveHalvingPruner()
+            study = optuna.create_study(direction="minimize", 
+                                        sampler=HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler), 
+                                       pruner = pruner, 
+                                       study_name = '{}_optuna'.format(k))
+            study.optimize(
+                lambda trial: optuna_objective(trial, X_train_protein, X_train_rna, y_train, inner_folds, #inner_cv, 
+                                               n_cores, random_state, model_type),
+                n_trials=n_trials, 
+                catch=(ValueError,)
+            )
+    #         write_pickled_object(study, os.path.join(data_path, 'interim', study.study_name + '.pickle'))
 
-        X_train = (X_train_protein, X_train_rna)
-        X_test = (X_test_protein, X_test_rna)
+            X_train = (X_train_protein, X_train_rna)
+            X_test = (X_test_protein, X_test_rna)
 
-        best_pipeline = generate_best_pipeline(study, model_type)
-        best_pipeline.fit(X_train, y_train)
+            best_pipeline = generate_best_pipeline(study, model_type)
+            best_pipeline.fit(X_train, y_train)
 
-        y_train_pred = best_pipeline.predict(X_train)
-        y_test_pred = best_pipeline.predict(X_test)
+            y_train_pred = best_pipeline.predict(X_train)
+            y_test_pred = best_pipeline.predict(X_test)
 
-        train_corr = pearsonr(y_train, y_train_pred)[0]
-        test_corr = pearsonr(y_test, y_test_pred)[0]
-        train_mse = mean_squared_error(y_train, y_train_pred)
-        test_mse = mean_squared_error(y_test, y_test_pred)
+            train_corr = pearsonr(y_train, y_train_pred)[0]
+            test_corr = pearsonr(y_test, y_test_pred)[0]
+            train_mse = mean_squared_error(y_train, y_train_pred)
+            test_mse = mean_squared_error(y_test, y_test_pred)
 
-        results.append({
-            "model_type": model_type,
-            "fold": k,
-            "train_corr": train_corr,
-            "test_corr": test_corr,
-            "train_mse": train_mse,
-            "test_mse": test_mse,
-            "best_params": study.best_params,
-            "inner_cv": study.trials_dataframe()
-            })
-        res_df = pd.DataFrame(results)
-        res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline_model_selection_individual.csv'))
-
-
-# In[ ]:
-
-
-
+            results.append({
+                "model_type": model_type,
+                "fold": k,
+                "train_corr": train_corr,
+                "test_corr": test_corr,
+                "train_mse": train_mse,
+                "test_mse": test_mse,
+                "best_params": study.best_params,
+                "inner_cv": study.trials_dataframe()
+                })
+            res_df = pd.DataFrame(results)
+            res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline_model_selection_joint_individual.csv'))
 
