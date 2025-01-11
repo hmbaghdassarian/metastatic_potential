@@ -7,6 +7,21 @@ from sklearn.base import BaseEstimator, TransformerMixin
 import pathlib
 import pickle
 
+def cohen_d(vector_1, vector_2):
+    # Calculate the means of the two vectors
+    mean1 = np.mean(vector_1)
+    mean2 = np.mean(vector_2)
+
+    # Calculate the standard deviations of the two vectors
+    std1 = np.std(vector_1, ddof=1)
+    std2 = np.std(vector_2, ddof=1)
+
+    # Calculate the pooled standard deviation
+    n1 = len(vector_1)
+    n2 = len(vector_2)
+    pooled_std = np.sqrt(((n1 - 1) * std1**2 + (n2 - 1) * std2**2) / (n1 + n2 - 2))
+
+    return (mean1 - mean2) / pooled_std
 
 def mixup(X, y, n_synthetic, alpha=2, random_state=None):
     """
