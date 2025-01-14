@@ -119,3 +119,21 @@ class MeanCenterer(TransformerMixin, BaseEstimator):
         return X - np.mean(X, axis=0)
     
 
+
+class ModalitySelector(BaseEstimator, TransformerMixin):
+    def __init__(self, modality):
+        if modality not in ['protein', 'rna']:
+            raise ValueError("modality must be 'protein' or 'rna'")
+        self.modality = modality
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        # X is expected to be a tuple: (X_protein, X_rna)
+        if self.modality == 'protein':
+            return X[0]  # Return X_protein
+        elif self.modality == 'rna':
+            return X[1]  # Return X_rna
+    
+
