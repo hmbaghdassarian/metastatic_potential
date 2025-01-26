@@ -1,3 +1,4 @@
+**/*.txt
 **/*.csv
 **/*.h5ad
 **/*.ipynb_checkpoints
