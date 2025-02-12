@@ -1,4 +1,4 @@
-"""Runs power analysis on same folds as Notebook 05Ai using single ANN."""
+"""Runs power analysis on same folds as Notebook 05Ai using single ANN. Written by Nikos Meimetis."""
 
 import torch
 import numpy as np

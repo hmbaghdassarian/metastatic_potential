@@ -1,4 +1,4 @@
-"""Runs prediction on same folds as Notebook 03, using single or ensemble ANNs."""
+"""Runs prediction on same folds as Notebook 03, using single or ensemble ANNs. Written by Nikos Meimetis."""
 
 import torch
 import numpy as np
