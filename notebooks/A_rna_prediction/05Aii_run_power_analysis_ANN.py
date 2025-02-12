@@ -179,5 +179,5 @@ for i, fold_ind in enumerate(cv):
             df['subset'] = train_key
             df = df.melt(id_vars=['iteration','subset'],var_name='set',value_name='r')
             res_all = pd.concat([res_all,df],axis=0)
-            res_all.to_csv(res_dir+'performance/'+'df_res_fold%s_model%s.csv'%(i,model_no))
+            res_all.to_csv(res_dir+'performance/'+'power_analysis_ann_transcriptomics.csv')
             model_no += 1
