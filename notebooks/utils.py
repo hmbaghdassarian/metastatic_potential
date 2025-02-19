@@ -4,8 +4,15 @@ import numpy as np
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_squared_error
 from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.cross_decomposition import PLSRegression
+
 import pathlib
 import pickle
+
+import optuna
+from optuna.samplers import CmaEsSampler, TPESampler, RandomSampler
+from optuna.distributions import CategoricalDistribution
+
 
 def cohen_d(vector_1, vector_2):
     # Calculate the means of the two vectors
@@ -118,7 +125,38 @@ class MeanCenterer(TransformerMixin, BaseEstimator):
     def transform(self, X, y=None):
         return X - np.mean(X, axis=0)
     
+class HybridSampler(optuna.samplers.BaseSampler):
+    def __init__(self, primary_sampler, fallback_sampler):
+        self.primary_sampler = primary_sampler  # e.g., CmaEsSampler
+        self.fallback_sampler = fallback_sampler  # e.g., TPESampler
 
+    def infer_relative_search_space(self, study, trial):
+        # Let the primary sampler define the relative search space
+        return self.primary_sampler.infer_relative_search_space(study, trial)
+
+    def sample_relative(self, study, trial, search_space):
+        # Let the primary sampler handle relative sampling
+        return self.primary_sampler.sample_relative(study, trial, search_space)
+
+    def sample_independent(self, study, trial, param_name, param_distribution):
+        # Use the fallback sampler for unsupported parameter types
+        if isinstance(param_distribution, CategoricalDistribution):
+            return self.fallback_sampler.sample_independent(study, trial, param_name, param_distribution)
+        # Default to the primary sampler
+        return self.primary_sampler.sample_independent(study, trial, param_name, param_distribution)
+
+class RandomTPESampler(TPESampler):
+    def __init__(self, exploration_sampler, exploration_freq=20, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.exploration_sampler = exploration_sampler
+        self.exploration_freq = exploration_freq
+
+    def sample_independent(self, study, trial, param_name, param_distribution):
+        # Use the exploration_sampler periodically
+        if trial.number % self.exploration_freq == 0:
+            return self.exploration_sampler.sample_independent(study, trial, param_name, param_distribution)
+        # Default to TPE
+        return super().sample_independent(study, trial, param_name, param_distribution)
 
 class ModalitySelector(BaseEstimator, TransformerMixin):
     def __init__(self, modality):
@@ -137,3 +175,12 @@ class ModalitySelector(BaseEstimator, TransformerMixin):
             return X[1]  # Return X_rna
     
 
+def pearson_corr_scorer(y_true, y_pred):
+    return pearsonr(y_true, y_pred)[0]
+
+class PLSRegression_X(PLSRegression):
+    def transform(self, X, y=None):
+        X_transformed = super().transform(X, y)
+        if isinstance(X_transformed, tuple):
+            X_transformed = X_transformed[0]
+        return X_transformed
