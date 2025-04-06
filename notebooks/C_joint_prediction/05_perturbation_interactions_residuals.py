@@ -1,0 +1,399 @@
+#!/usr/bin/env python
+# coding: utf-8
+
+# Since linear models don't capture interactions between features, here, we test for this. This can reveal synergies or antagonisms that have outsized effects on metastatic potential. 
+
+# In[237]:
+
+
+import os
+import itertools
+import random
+from multiprocessing import Pool
+
+
+from tqdm import tqdm 
+
+import pandas as pd
+import numpy as np
+
+import statsmodels.formula.api as smf
+from statsmodels.stats.multitest import multipletests
+
+import seaborn as sns
+import matplotlib.pyplot as plt 
+
+import sys
+sys.path.insert(1, '../')
+from utils import read_pickled_object
+
+
+# In[2]:
+
+
+data_path = '/nobackup/users/hmbaghda/metastatic_potential/'
+random_state = 42 + 3
+
+n_cores = 80
+os.environ["OMP_NUM_THREADS"] = str(n_cores)
+os.environ["MKL_NUM_THREADS"] = str(n_cores)
+os.environ["OPENBLAS_NUM_THREADS"] = str(n_cores)
+os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_cores)
+os.environ["NUMEXPR_NUM_THREADS"] = str(n_cores)
+
+
+# Load data:
+
+# In[3]:
+
+
+X = pd.read_csv(os.path.join(data_path, 'processed',  'expr_joint.csv'), index_col = 0)
+expr_joint = X.copy()
+
+mp_joint=pd.read_csv(os.path.join(data_path, 'processed', 'metastatic_potential_joint.csv'), index_col = 0)['mean']
+y = mp_joint.values.ravel()
+
+expr_protein = pd.read_csv(os.path.join(data_path, 'processed',  'expr_protein.csv'), index_col = 0)
+expr_rna = pd.read_csv(os.path.join(data_path, 'processed',  'expr.csv'), index_col = 0)
+
+protein_cols = expr_protein.columns
+rna_cols = expr_rna.columns
+
+X_protein = X[protein_cols].values
+X_rna = X[rna_cols].values
+
+
+# As in [Notebook 04](./04_feature_analysis.ipynb), we fit the consensus linear SVR on the entire dataset:
+
+# In[4]:
+
+
+best_pipeline = read_pickled_object(os.path.join(data_path, 'processed', 
+                                                 'best_model_svr_linear_joint.pickle'))
+X = (X_protein, X_rna)
+best_pipeline.fit(X, y)
+
+# load from notebook 04
+# best_pipeline = read_pickled_object(os.path.join(data_path, 'interim', 'best_linearSVR_joint_fitted_allsamples.pickle'))
+
+
+# In[5]:
+
+
+model_coefs = pd.read_csv(os.path.join(data_path, 'interim', 'joint_features.csv'), 
+                          index_col = 0)
+if not np.allclose(model_coefs['SVM coefficient'].values, 
+                   best_pipeline.named_steps['model'].coef_.flatten()):
+    raise ValueError('Inconsitency between Notebook 04 and 05')
+model_coefs.sort_values(by='SVM coefficient', key=lambda x: x.abs(), ascending=False, inplace=True)
+model_coefs.set_index('feature_name', inplace = True)
+
+
+# Get the prediction:
+
+# In[6]:
+
+
+# get prediction
+y_pred = best_pipeline.predict(X)
+residuals = y - y_pred
+
+
+# Center the data:
+
+# In[7]:
+
+
+X_map = {'Transcriptomics': X_rna, 'Proteomics': X_protein}
+X_map = {k: X_ - np.mean(X_, axis=0) for k, X_ in X_map.items()} # center the data
+
+# # center and scale the data
+# from sklearn.preprocessing import StandardScaler
+# for k, X_ in X_map.items():
+#     scaler = StandardScaler()
+#     X_scaled = scaler.fit_transform(X_)
+#     X_map[k] = X_scaled
+    
+# for k, X_ in X_map.items():
+#     X_centered = X_ - np.mean(X_, axis=0) # mean center
+#     X_map[k] = X_centered
+#     X_scaled = X_centered / np.std(X_, axis=0) # scale
+#     X_map[k] = X_scaled
+
+
+# Get the interactions:
+
+
+
+
+# ## GA
+# The top 50 features have no significant interactions. However, it is possible for interactions to occur non-intuitively across features that don't have high ranks. So, let's use a genetic algorithm to find a set of 50 features with the highest coefficients and see what that set of features looks like:
+
+# In[253]:
+
+
+def get_interaction_value_ga(feature_1: str, feature_2: str, 
+                             residuals = residuals, 
+                             X_map = X_map, 
+                             model_coefs = model_coefs):
+    X_1 = X_map[model_coefs.loc[feature_1,'Modality']][:, model_coefs.loc[feature_1, 'feature_index']]
+    X_2 = X_map[model_coefs.loc[feature_2,'Modality']][:, model_coefs.loc[feature_2, 'feature_index']]
+
+    ols_df = pd.DataFrame({"residual": residuals, 
+                           "X_tilda": X_1 * X_2})
+
+    ols_interaction = smf.ols("residual ~ X_tilda", data=ols_df).fit()
+
+
+    coef = abs(ols_interaction.params.X_tilda)
+    se = ols_interaction.bse.X_tilda
+    
+    t_statistic = float(coef)/se
+    
+    return coef, t_statistic
+
+def generate_individual(seed, n_genes):
+    random.seed(seed)
+    return random.sample(all_features, n_genes)
+
+
+# --- Fitness function ---
+def evaluate_solution(feature_subset):
+    """Evaluates by a hybrid scoring of t-statistic and abs coefficient. 
+    
+    T-statistic controls for the SE. Since t-statistic is normalized and coefficient is not, 
+    we min-max scale both. 
+    
+    alpha controls weighting of coef vs t-statistic on score. 
+    
+    """
+    ALPHA=0.2
+    
+    pairs = itertools.combinations(feature_subset, 2)
+    coefs = []
+    t_stats = []
+    for f1, f2 in pairs:
+        coef, t_statistic = get_interaction_value_ga(f1, f2)
+        coefs.append(coef)
+        t_stats.append(t_statistic)
+
+    # Min-max normalize both arrays
+    coef_arr = np.log1p(np.array(coefs)) # log-transform due to extreme range of coefs
+    tstat_arr = np.log1p(np.array(t_stats))
+
+    # Avoid divide-by-zero with epsilon
+    eps = 1e-8
+    coef_norm = (coef_arr - coef_arr.min()) / (coef_arr.max() - coef_arr.min() + eps)
+    tstat_norm = (tstat_arr - tstat_arr.min()) / (tstat_arr.max() - tstat_arr.min() + eps)
+
+    # Combine with weight alpha
+    hybrid_scores = ALPHA * coef_norm + (1 - ALPHA) * tstat_norm
+
+    return float(np.median(hybrid_scores))
+
+def rank_selection(seed, pop, scores, num_selected):
+    '''Assign probability of selection according to rank order of the population'''
+    
+    # rank order by lowest fitness to highest fitness
+    sorted_pop = [x for _, x in sorted(zip(scores, pop), key=lambda x: x[0])] 
+    ranks = list(range(1, len(sorted_pop) + 1))
+    probs = [r / sum(ranks) for r in ranks]
+    
+    # select according to probability of rank
+    random.seed(seed)
+    selected_pop = random.choices(sorted_pop, weights=probs, k=num_selected)
+    return selected_pop
+
+
+# In[254]:
+
+
+class SeedTracker:
+    def __init__(self):
+        self._gi_seed = 42
+        self._rs_seed = 888
+        self._offspring_1 = 2024
+        self._offspring_2 = 4048
+        self._offspring_3 = 8096
+        self._mutation_seed_1 = 16192
+        self._mutation_seed_2 = 32384
+
+    @property
+    def gi_seed(self):
+        self._gi_seed += 1
+        return self._gi_seed
+    
+    @property
+    def rs_seed(self):
+        self._rs_seed += 1
+        return self._rs_seed
+    
+    @property
+    def offspring_1(self):
+        self._offspring_1 += 1
+        return self._offspring_1
+    
+    @property
+    def offspring_2(self):
+        self._offspring_2 += 1
+        return self._offspring_2
+
+    @property
+    def offspring_3(self):
+        self._offspring_3 += 1
+        return self._offspring_3
+    
+    @property
+    def mutation_seed_1(self):
+        self._mutation_seed_1 += 1
+        return self._mutation_seed_1
+
+    @property
+    def mutation_seed_2(self):
+        self._mutation_seed_2 += 1
+        return self._mutation_seed_2
+    
+seed_tracker = SeedTracker()
+
+
+# In[169]:
+
+
+# --- Parameters ---
+POP_SIZE = 80*9 # no. of solutions
+n_cores = min(n_cores, POP_SIZE)
+N_GENES = 25 # feature set per solution (find n highly interacting genes)
+N_GENERATIONS = 300 # no. of iterations of GA
+#MUTATION_RATE = 0.2
+GENE_MUTATION_RATE = 0.1 # probability of mutating each gene in each child
+
+
+# injecting some randomness and monitoring convergence
+patience = min(15, np.round(N_GENERATIONS / 10)) # early stopping after plateau for n iterations
+n_restart_individuals = max(int(np.round(POP_SIZE*0.15)), 2) # randomly replace the bottom 15% of the population 
+restart_n_iterations = int(np.round(N_GENERATIONS)*0.2) # randomly replace every n generations
+
+n_restarts_prior_to_break = 3 # allows n restarted prior to breaking
+mutation_increase = 0.05
+mgnr = GENE_MUTATION_RATE + n_restarts_prior_to_break*mutation_increase
+
+
+
+
+all_features = model_coefs.index.tolist()
+
+score_tracker = pd.DataFrame(columns = range(POP_SIZE))
+
+population = [generate_individual(seed_tracker.gi_seed, N_GENES) for _ in range(POP_SIZE)] # initialize solutions
+best_so_far = -np.inf
+best_set = []
+broken = False
+no_improvement = 0
+
+for gen in range(N_GENERATIONS):
+    print(f"Generation {gen + 1}/{N_GENERATIONS}")
+    
+    # evaluate fitness of each solution
+    if n_cores in [1, 0, None]:
+        fitness_scores = [evaluate_solution(ind) for ind in tqdm(population)]
+    else:
+        with Pool(n_cores) as pool:
+            fitness_scores = list(tqdm(pool.imap(evaluate_solution, population), total=len(population)))
+
+    # track # of iterations that have no improvement in best fitness score
+    current_best = max(fitness_scores)
+    if current_best > best_so_far:
+        best_so_far = current_best
+        best_set = population[np.argmax(fitness_scores)]
+        no_improvement = 0
+    else:
+        no_improvement += 1
+        
+    if no_improvement >= patience:
+        if GENE_MUTATION_RATE < mgnr: # diversify 
+            # increase gene mutation rate
+            GENE_MUTATION_RATE += mutation_increase
+            
+            # randomly replace bottom percent of individuals 
+            sorted_population = [x for _, x in sorted(zip(fitness_scores, population), key=lambda pair: pair[0], reverse=True)]
+            population = sorted_population[:-n_restart_individuals] + [generate_individual(seed_tracker.gi_seed, N_GENES) for _ in range(n_restart_individuals)]
+            no_improvement = 0 # reset 
+        else: # early stopping
+            broken = True
+            break
+            
+    # randomly replace bottom percent of individuals every n generations
+    if gen % restart_n_iterations == 0 and gen != 0:
+        # randomly replace a subet of the population
+        sorted_population = [x for _, x in sorted(zip(fitness_scores, population), key=lambda pair: pair[0], reverse=True)]
+        population = sorted_population[:-n_restart_individuals] + [generate_individual(seed_tracker.gi_seed, N_GENES) for _ in range(n_restart_individuals)]
+        
+    
+    score_tracker.loc[gen, :] = fitness_scores
+    
+#     # Selection: keep top 50% (elitism)
+#     sorted_pop = [x for _, x in sorted(zip(fitness_scores, population), key=lambda pair: pair[0], reverse=True)]
+#     population = sorted_pop[:POP_SIZE // 2]
+
+    # Selection: Rank selection
+    population = rank_selection(seed = seed_tracker.rs_seed, 
+                                pop = population, 
+                                scores = fitness_scores, 
+                                num_selected = POP_SIZE //2)
+
+    # Reproduction: crossover
+    offspring = []
+#     while len(offspring) + len(population) < POP_SIZE:
+    while len(offspring) < POP_SIZE - len(population):
+        random.seed(seed_tracker.offspring_1)
+        p1, p2 = random.sample(population, 2)
+        
+        # limit cut range from 20 - 80% of parents
+        min_cut = int(N_GENES * 0.2)
+        max_cut = int(N_GENES * 0.8)
+        
+        random.seed(seed_tracker.offspring_2)
+        cut = random.randint(min_cut, max_cut) # random.randint(1, N_GENES - 2)
+        child = list(dict.fromkeys(p1[:cut] + p2[cut:]))  # remove duplicates while preserving order
+
+        # If child has < 50 genes, fill with random unused features
+        unused = list(set(all_features) - set(child))
+        random.seed(seed_tracker.offspring_3)
+        child += random.sample(unused, N_GENES - len(child))
+        offspring.append(child)
+        
+    # MUTATION
+    for child in offspring:
+        for i in range(N_GENES):
+            random.seed(seed_tracker.mutation_seed_1)
+            if random.random() < GENE_MUTATION_RATE:
+                # Replace current gene with a random, unused gene
+                available_genes = list(set(all_features) - set(child))
+                if available_genes:  # make sure there's something to choose from
+                    random.seed(seed_tracker.mutation_seed_2)
+                    new_gene = random.choice(available_genes)
+                    child[i] = new_gene
+
+    # Form new population
+    population += offspring
+    if len(population) != POP_SIZE:
+        raise ValueError('Something went wrong here')
+        
+        
+    if (gen % 10 == 0) and gen != 0:
+        score_tracker.to_csv(os.path.join(data_path, 'processed', 'joint_interaction_residuals_ga_scores.csv'))
+
+        with open(os.path.join(data_path, 'interim', 'joint_interaction_residuals_ga_solution.txt'), "w") as f:
+            for item in best_set:
+                f.write(f"{item}\n")
+
+# --- Final evaluation ---
+if not broken:
+    final_scores = [evaluate_solution(ind) for ind in tqdm(population)]
+    score_tracker.loc[score_tracker.shape[0], :] = final_scores
+    
+score_tracker.to_csv(os.path.join(data_path, 'processed', 'joint_interaction_residuals_ga_scores.csv'))
+
+with open(os.path.join(data_path, 'interim', 'joint_interaction_residuals_ga_solution.txt'), "w") as f:
+    for item in best_set:
+        f.write(f"{item}\n")
