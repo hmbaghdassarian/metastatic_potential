@@ -3,14 +3,25 @@
 
 # Since linear models don't capture interactions between features, here, we test for this. This can reveal synergies or antagonisms that have outsized effects on metastatic potential. 
 
-# In[237]:
+# In[ ]:
+
+
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("--feature_type", type=str, required=True, help="how to filter features")
+args = parser.parse_args()
+feature_type = args.feature_type
+# python 05_perturbation_interactions_residuals_sets.py --feature_type all 
+
+
+# In[398]:
 
 
 import os
 import itertools
 import random
 from multiprocessing import Pool
-
+from math import comb
 
 from tqdm import tqdm 
 
@@ -123,7 +134,57 @@ X_map = {k: X_ - np.mean(X_, axis=0) for k, X_ in X_map.items()} # center the da
 
 # Get the interactions:
 
+# In[8]:
 
+
+def get_interaction_value(feature_1: str, feature_2: str, residuals, X_map, model_coefs):
+    X_1 = X_map[model_coefs.loc[feature_1,'Modality']][:, model_coefs.loc[feature_1, 'feature_index']]
+    X_2 = X_map[model_coefs.loc[feature_2,'Modality']][:, model_coefs.loc[feature_2, 'feature_index']]
+
+    ols_df = pd.DataFrame({"residual": residuals, 
+                           "X_tilda": X_1 * X_2})
+
+    ols_interaction = smf.ols("residual ~ X_tilda", data=ols_df).fit()
+
+
+    coef = float(ols_interaction.params.X_tilda)
+    pval = float(ols_interaction.pvalues.X_tilda)
+    
+    return coef, pval
+
+
+# In[9]:
+
+
+top_n = 50
+features = model_coefs.index.tolist()[:top_n]
+feature_combs = list(itertools.combinations(features, 2))
+
+
+# In[10]:
+
+
+res_all = []
+for feature_comb in tqdm(feature_combs):
+    res = get_interaction_value(feature_comb[0], feature_comb[1], residuals, X_map, model_coefs)
+    res_all.append(res)
+
+res_all = pd.DataFrame(res_all, columns = ['coef', 'pval'])
+_, bh_fdr, _, _ = multipletests(res_all.pval, method='fdr_bh')
+res_all['bh_fdr'] = bh_fdr
+
+res_all = pd.concat([
+    pd.DataFrame(feature_combs, columns = ['feature_1', 'feature_2']),
+    res_all
+],
+    axis = 1)
+res_all.to_csv(os.path.join(data_path, 'processed', 'joint_interaction_residuals.csv'))
+
+
+# In[11]:
+
+
+res_all[res_all.bh_fdr <= 0.1]
 
 
 # ## GA
@@ -177,14 +238,18 @@ def evaluate_solution(feature_subset):
         coefs.append(coef)
         t_stats.append(t_statistic)
 
-    # Min-max normalize both arrays
-    coef_arr = np.log1p(np.array(coefs)) # log-transform due to extreme range of coefs
-    tstat_arr = np.log1p(np.array(t_stats))
+    coef_norm = np.log1p(np.array(coefs))
+    tstat_norm = np.log1p(np.array(t_stats))
 
-    # Avoid divide-by-zero with epsilon
-    eps = 1e-8
-    coef_norm = (coef_arr - coef_arr.min()) / (coef_arr.max() - coef_arr.min() + eps)
-    tstat_norm = (tstat_arr - tstat_arr.min()) / (tstat_arr.max() - tstat_arr.min() + eps)
+#     # log-transform due to extreme range of coefs
+#     coef_arr = np.log1p(np.array(coefs)) 
+#     tstat_arr = np.log1p(np.array(t_stats))
+    
+#     # Min-max normalize both arrays -- not doing because makes changes too sublte
+#     # Avoid divide-by-zero with epsilon
+#     eps = 1e-8
+#     coef_norm = (coef_arr - coef_arr.min()) / (coef_arr.max() - coef_arr.min() + eps)
+#     tstat_norm = (tstat_arr - tstat_arr.min()) / (tstat_arr.max() - tstat_arr.min() + eps)
 
     # Combine with weight alpha
     hybrid_scores = ALPHA * coef_norm + (1 - ALPHA) * tstat_norm
@@ -256,11 +321,11 @@ class SeedTracker:
 seed_tracker = SeedTracker()
 
 
-# In[169]:
+# In[366]:
 
 
 # --- Parameters ---
-POP_SIZE = 80*9 # no. of solutions
+POP_SIZE = 80*18 # no. of solutions
 n_cores = min(n_cores, POP_SIZE)
 N_GENES = 25 # feature set per solution (find n highly interacting genes)
 N_GENERATIONS = 300 # no. of iterations of GA
@@ -278,9 +343,60 @@ mutation_increase = 0.05
 mgnr = GENE_MUTATION_RATE + n_restarts_prior_to_break*mutation_increase
 
 
+# Define a subset of features to search:
+
+# In[474]:
 
 
-all_features = model_coefs.index.tolist()
+if feature_type == 'all':
+    all_features = model_coefs.index.tolist()
+    fn = ''
+elif feature_type == 'top400':
+    top_n = 400
+    all_features = model_coefs.index.tolist()[:top_n]
+    fn = 'top{}'.format(top_n)
+elif feature_type == 'enriched':
+    for key in ['negative', 'positive']:
+        enriched_genes = set()
+        ms = pd.read_excel(os.path.join(data_path, 'processed', key + '_joint_metascape_results.xlsx'), 
+                           sheet_name = 'Enrichment',
+                           index_col = None)
+        enriched_genes = enriched_genes.union(set.union(*ms.Symbols.apply(lambda x: set(x.split(','))).tolist()))
+    all_features = model_coefs[model_coefs.gene_name.isin(enriched_genes)].index.tolist()
+    fn = 'enriched'
+elif feature_type == 'transcription_factors':
+    # from scLEMBAS, load the static collectri network as of June 2024
+    grn_link = 'https://zenodo.org/records/11477837/files/grn_organism_06_04_24.csv'
+    grn = 'collectri'
+    organism = 'human'
+    net = pd.read_csv(grn_link.replace('grn', grn).replace('organism', organism), index_col = 0)
+    tfs = net.source.unique().tolist()
+    all_features = model_coefs[model_coefs.gene_name.isin(tfs)].index.tolist()
+    fn = 'tfs'
+elif feature_type == 'cancer_cell_map':
+    # from scLEMBAS, load the statist omnipath DB and parse the cancer cell map
+    ppi_link = 'https://zenodo.org/records/11477837/files/organism_omnipath_ppi_05_24_24.csv'
+    organism = 'human'
+    sn_ppis = pd.read_csv(ppi_link.replace('organism', organism), index_col = 0) 
+
+    sn_ppis.sources = sn_ppis.sources.apply(lambda x: x.split(';'))
+    ccm = sn_ppis[sn_ppis.sources.apply(lambda x: 'CancerCellMap' in x)]
+
+    ccm_genes = sorted(set(ccm.source_genesymbol.tolist() + ccm.target_genesymbol.tolist()))
+    all_features = model_coefs[model_coefs.gene_name.isin(ccm_genes)].index.tolist()
+    fn = 'ccm'
+elif feature_type == 'cancer_gene_consensus':
+    cgc = pd.read_csv(os.path.join(data_path, 'raw', 'Cosmic_CancerGeneCensus_v101_GRCh38_04_07_25.tsv'), 
+                  sep = '\t')
+    cgc = cgc.GENE_SYMBOL.unique().tolist()
+    all_features = model_coefs[model_coefs.gene_name.isin(cgc)].index.tolist()
+    fn = 'cgc'
+    
+
+
+# In[256]:
+
+
 
 score_tracker = pd.DataFrame(columns = range(POP_SIZE))
 
@@ -381,9 +497,9 @@ for gen in range(N_GENERATIONS):
         
         
     if (gen % 10 == 0) and gen != 0:
-        score_tracker.to_csv(os.path.join(data_path, 'processed', 'joint_interaction_residuals_ga_scores.csv'))
+        score_tracker.to_csv(os.path.join(data_path, 'processed', 'joint_interaction_residuals_ga_scores_sets' + fn + '.csv'))
 
-        with open(os.path.join(data_path, 'interim', 'joint_interaction_residuals_ga_solution.txt'), "w") as f:
+        with open(os.path.join(data_path, 'interim', 'joint_interaction_residuals_ga_solution_sets' + fn + '.txt'), "w") as f:
             for item in best_set:
                 f.write(f"{item}\n")
 
@@ -392,8 +508,8 @@ if not broken:
     final_scores = [evaluate_solution(ind) for ind in tqdm(population)]
     score_tracker.loc[score_tracker.shape[0], :] = final_scores
     
-score_tracker.to_csv(os.path.join(data_path, 'processed', 'joint_interaction_residuals_ga_scores.csv'))
+score_tracker.to_csv(os.path.join(data_path, 'processed', 'joint_interaction_residuals_ga_scores_sets' + fn + '.csv'))
 
-with open(os.path.join(data_path, 'interim', 'joint_interaction_residuals_ga_solution.txt'), "w") as f:
+with open(os.path.join(data_path, 'interim', 'joint_interaction_residuals_ga_solution_sets' + fn + '.txt'), "w") as f:
     for item in best_set:
         f.write(f"{item}\n")
