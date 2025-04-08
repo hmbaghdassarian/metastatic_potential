@@ -11,10 +11,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--feature_type", type=str, required=True, help="how to filter features")
 args = parser.parse_args()
 feature_type = args.feature_type
+
 # python 05_perturbation_interactions_residuals_pairs.py --feature_type all 
+# feature_type =  'top400', 'enriched', 'transcription_factors'
 
 
-# In[4]:
+# In[1]:
 
 
 import os
@@ -22,8 +24,6 @@ import itertools
 import random
 from multiprocessing import Pool
 from math import comb
-
-
 
 from tqdm import tqdm 
 
@@ -41,7 +41,7 @@ sys.path.insert(1, '../')
 from utils import read_pickled_object
 
 
-# In[5]:
+# In[2]:
 
 
 data_path = '/nobackup/users/hmbaghda/metastatic_potential/'
@@ -57,7 +57,7 @@ os.environ["NUMEXPR_NUM_THREADS"] = str(n_cores)
 
 # Load data:
 
-# In[6]:
+# In[3]:
 
 
 X = pd.read_csv(os.path.join(data_path, 'processed',  'expr_joint.csv'), index_col = 0)
@@ -78,7 +78,7 @@ X_rna = X[rna_cols].values
 
 # As in [Notebook 04](./04_feature_analysis.ipynb), we fit the consensus linear SVR on the entire dataset:
 
-# In[7]:
+# In[4]:
 
 
 best_pipeline = read_pickled_object(os.path.join(data_path, 'processed', 
@@ -90,7 +90,7 @@ best_pipeline.fit(X, y)
 # best_pipeline = read_pickled_object(os.path.join(data_path, 'interim', 'best_linearSVR_joint_fitted_allsamples.pickle'))
 
 
-# In[8]:
+# In[5]:
 
 
 model_coefs = pd.read_csv(os.path.join(data_path, 'interim', 'joint_features.csv'), 
@@ -104,7 +104,7 @@ model_coefs.set_index('feature_name', inplace = True)
 
 # Get the prediction:
 
-# In[9]:
+# In[6]:
 
 
 # get prediction
@@ -114,7 +114,7 @@ residuals = y - y_pred
 
 # Center the data:
 
-# In[10]:
+# In[7]:
 
 
 X_map = {'Transcriptomics': X_rna, 'Proteomics': X_protein}
@@ -136,7 +136,7 @@ X_map = {k: X_ - np.mean(X_, axis=0) for k, X_ in X_map.items()} # center the da
 
 # Get the interactions:
 
-# In[11]:
+# In[8]:
 
 
 def get_interaction_value(feature_1: str, feature_2: str, residuals, X_map, model_coefs):
@@ -152,13 +152,17 @@ def get_interaction_value(feature_1: str, feature_2: str, residuals, X_map, mode
     coef = float(ols_interaction.params.X_tilda)
     pval = float(ols_interaction.pvalues.X_tilda)
     
-    return coef, pval
+    se = ols_interaction.bse.X_tilda
+    
+    t_statistic = float(abs(coef))/se
+    
+    return coef, pval, t_statistic
 
 
 # ## GA
 # The top 50 features have no significant interactions. However, it is possible for interactions to occur non-intuitively across features that don't have high ranks. So, let's use a genetic algorithm to find a subset of 25 choose 2 features with the highest coefficients within the top 400 instead. 
 
-# In[17]:
+# In[9]:
 
 
 def get_interaction_value_ga(feature_1: str, feature_2: str, 
@@ -190,16 +194,20 @@ def generate_individual(seed, n_pairs):
 # --- Fitness function ---
 def evaluate_solution(pair_subset):
     """Evaluate solution based on hybrid scoring of abs(coef) and t-statistic."""
-    ALPHA = 0.2
+#     ALPHA = 0.2
     coefs, t_stats = [], []
 
     for f1, f2 in pair_subset:
         coef, t_stat = get_interaction_value_ga(f1, f2)
         coefs.append(coef)
         t_stats.append(t_stat)
+        
+    # log-transform
+    coefs = np.log1p(np.array(coefs))
+    t_stats = np.log1p(np.array(t_stats))
 
-    coef_norm = np.log1p(np.array(coefs))
-    tstat_norm = np.log1p(np.array(t_stats))
+#     coef_norm = np.log1p(np.array(coefs))
+#     tstat_norm = np.log1p(np.array(t_stats))
 
 #     # log-transform due to extreme range of coefs
 #     coef_arr = np.log1p(np.array(coefs)) 
@@ -211,8 +219,8 @@ def evaluate_solution(pair_subset):
 #     coef_norm = (coef_arr - coef_arr.min()) / (coef_arr.max() - coef_arr.min() + eps)
 #     tstat_norm = (tstat_arr - tstat_arr.min()) / (tstat_arr.max() - tstat_arr.min() + eps)
 
-    hybrid_scores = ALPHA * coef_norm + (1 - ALPHA) * tstat_norm
-    return float(np.median(hybrid_scores))
+#     hybrid_scores = ALPHA * coef_norm + (1 - ALPHA) * tstat_norm
+    return coefs, t_stats #float(np.median(hybrid_scores))
 
 
 def rank_selection(seed, pop, scores, num_selected):
@@ -228,8 +236,42 @@ def rank_selection(seed, pop, scores, num_selected):
     selected_pop = random.choices(sorted_pop, weights=probs, k=num_selected)
     return selected_pop
 
+def score_fitness(raw_fitness_components, lambda_ = 0.25):
+    '''Scores fitness of each individual in population for a given generation.
+    
+    
+    Evaluates by a hybrid scoring of t-statistic and abs coefficient. 
+    
+    These components are log-transformed in evaluate_solution.
+    
+    T-statistic controls for the SE. Since t-statistic is normalized and coefficient is not, 
+    we min-max scale both so that they are on similar scales. 
+    
+    lambda_ controls weighting of coef vs t-statistic on score. 
+    '''
+    # min-max scale individuals according to population
+    population_coefs = [c for coefs, _ in raw_fitness_components for c in coefs]
+    population_tstats = [t for _, tstats in raw_fitness_components for t in tstats]
 
-# In[18]:
+    coef_min, coef_max = np.min(population_coefs), np.max(population_coefs)
+    tstat_min, tstat_max = np.min(population_tstats), np.max(population_tstats)
+
+    eps = 1e-12 # avoid dividing by 0
+
+    fitness_scores = []
+    for coefs, tstats in raw_fitness_components:
+        # scale individuals 
+        coef_arr = (np.array(coefs) - coef_min) / (coef_max - coef_min + eps)
+        tstat_arr = (np.array(tstats) - tstat_min) / (tstat_max - tstat_min + eps)
+
+        # Compute hybrid score
+        hybrid_scores = lambda_ * coef_arr + (1 - lambda_) * tstat_arr
+        fitness_scores.append(float(np.median(hybrid_scores)))
+        
+    return fitness_scores
+
+
+# In[56]:
 
 
 class SeedTracker:
@@ -237,7 +279,8 @@ class SeedTracker:
         self._gi_seed = 42
         self._rs_seed = 888
         self._offspring_1 = 2024
-        self._offspring_2 = 4048
+        self._offspring_2a = 4048
+        self._offspring_2b = 64768
         self._offspring_3 = 8096
         self._mutation_seed_1 = 16192
         self._mutation_seed_2 = 32384
@@ -258,9 +301,14 @@ class SeedTracker:
         return self._offspring_1
     
     @property
-    def offspring_2(self):
-        self._offspring_2 += 1
-        return self._offspring_2
+    def offspring_2a(self):
+        self._offspring_2a += 1
+        return self._offspring_2a
+    
+    @property
+    def offspring_2b(self):
+        self._offspring_2b += 1
+        return self._offspring_2b
 
     @property
     def offspring_3(self):
@@ -280,7 +328,7 @@ class SeedTracker:
 seed_tracker = SeedTracker()
 
 
-# In[19]:
+# In[57]:
 
 
 # --- Parameters ---
@@ -304,16 +352,17 @@ mgnr = GENE_MUTATION_RATE + n_restarts_prior_to_break*mutation_increase
 
 # Define a subset of features to search:
 
-# In[ ]:
+# In[13]:
 
 
+fn = 'v2'
 if feature_type == 'all':
     all_features = model_coefs.index.tolist()
-    fn = ''
+    fn += ''
 elif feature_type == 'top400':
     top_n = 400
     all_features = model_coefs.index.tolist()[:top_n]
-    fn = 'top{}'.format(top_n)
+    fn += 'top{}'.format(top_n)
 elif feature_type == 'enriched':
     for key in ['negative', 'positive']:
         enriched_genes = set()
@@ -322,7 +371,7 @@ elif feature_type == 'enriched':
                            index_col = None)
         enriched_genes = enriched_genes.union(set.union(*ms.Symbols.apply(lambda x: set(x.split(','))).tolist()))
     all_features = model_coefs[model_coefs.gene_name.isin(enriched_genes)].index.tolist()
-    fn = 'enriched'
+    fn += 'enriched'
 elif feature_type == 'transcription_factors':
     # from scLEMBAS, load the static collectri network as of June 2024
     grn_link = 'https://zenodo.org/records/11477837/files/grn_organism_06_04_24.csv'
@@ -331,7 +380,7 @@ elif feature_type == 'transcription_factors':
     net = pd.read_csv(grn_link.replace('grn', grn).replace('organism', organism), index_col = 0)
     tfs = net.source.unique().tolist()
     all_features = model_coefs[model_coefs.gene_name.isin(tfs)].index.tolist()
-    fn = 'tfs'
+    fn += 'tfs'
 elif feature_type == 'cancer_cell_map':
     # from scLEMBAS, load the statist omnipath DB and parse the cancer cell map
     ppi_link = 'https://zenodo.org/records/11477837/files/organism_omnipath_ppi_05_24_24.csv'
@@ -343,13 +392,17 @@ elif feature_type == 'cancer_cell_map':
 
     ccm_genes = sorted(set(ccm.source_genesymbol.tolist() + ccm.target_genesymbol.tolist()))
     all_features = model_coefs[model_coefs.gene_name.isin(ccm_genes)].index.tolist()
-    fn = 'ccm'
+    fn += 'ccm'
 elif feature_type == 'cancer_gene_consensus':
     cgc = pd.read_csv(os.path.join(data_path, 'raw', 'Cosmic_CancerGeneCensus_v101_GRCh38_04_07_25.tsv'), 
                   sep = '\t')
     cgc = cgc.GENE_SYMBOL.unique().tolist()
     all_features = model_coefs[model_coefs.gene_name.isin(cgc)].index.tolist()
-    fn = 'cgc'
+    fn += 'cgc'
+
+
+# In[ ]:
+
 
 all_possible_pairs = set(itertools.combinations(all_features, 2))
 
@@ -365,12 +418,16 @@ no_improvement = 0
 for gen in range(N_GENERATIONS):
     print(f"Generation {gen + 1}/{N_GENERATIONS}")
     
-    # evaluate fitness of each solution
+    # get log-transformed coefs/tstats for each population
     if n_cores in [1, 0, None]:
-        fitness_scores = [evaluate_solution(ind) for ind in tqdm(population)]
+        raw_fitness_components = [evaluate_solution(ind) for ind in tqdm(population)] 
     else:
         with Pool(n_cores) as pool:
-            fitness_scores = list(tqdm(pool.imap(evaluate_solution, population), total=len(population)))
+            raw_fitness_components = list(tqdm(pool.imap(evaluate_solution, population), total=len(population)))
+
+    # score with hybrid of t-stat and coefficient
+    # scale values across population
+    fitness_scores = score_fitness(raw_fitness_components, lambda_ = 0.25)
 
     # track # of iterations that have no improvement in best fitness score
     current_best = max(fitness_scores)
@@ -420,31 +477,61 @@ for gen in range(N_GENERATIONS):
         random.seed(seed_tracker.offspring_1)
         p1, p2 = random.sample(population, 2)
 
-        min_cut = int(N_GENES * 0.2)
-        max_cut = int(N_GENES * 0.8)
-        random.seed(seed_tracker.offspring_2)
-        cut = random.randint(min_cut, max_cut)
+        if gen < N_GENERATIONS // 3: # multiple cut points early in evolution (first 30%)
+            random.seed(seed_tracker.offspring_2a)
+            n_cuts = random.randint(2, 4)  # choose 2 to 4 cut points
+            cut_points = sorted(random.sample(range(1, N_GENES - 1), n_cuts))
+            cut_points = [0] + cut_points + [N_GENES]
 
-        child = list(dict.fromkeys(p1[:cut] + p2[cut:]))  # unique pairs
+            # Alternate segments from parents
+            child = []
+            for i in range(len(cut_points) - 1):
+                start, end = cut_points[i], cut_points[i + 1]
+                segment = p1[start:end] if i % 2 == 0 else p2[start:end]
+                child.extend(segment)
+            child = list(dict.fromkeys(child))
+        else: # one cut point later in evolution
+            min_cut = int(N_GENES * 0.2)
+            max_cut = int(N_GENES * 0.8)
+            random.seed(seed_tracker.offspring_2b)
+            cut = random.randint(min_cut, max_cut) # random.randint(1, N_GENES - 2)
+            child = list(dict.fromkeys(p1[:cut] + p2[cut:]))  # remove duplicates while preserving order
 
-        # Fill with unused pairs if needed
-        existing_pairs = set(child)
-        unused = list(all_possible_pairs - existing_pairs)
-        random.seed(seed_tracker.offspring_3)
-        child += random.sample(unused, N_GENES - len(child))
+        # If child has < N_GENES genes, fill with random unused features
+        if len(child) < N_GENES:
+            unused = list(set(all_possible_pairs) - set(child))
+            random.seed(seed_tracker.offspring_3)
+            child += random.sample(unused, N_GENES - len(child))
+
         offspring.append(child)
+
                     
-    # MUTATION (per pair)
-    for child in offspring:
+#     # MUTATION (per pair)
+#     for child in offspring:
+#         current_pairs = set(child)
+#         available = list(all_possible_pairs - current_pairs)
+#         for i in range(N_GENES):
+#             random.seed(seed_tracker.mutation_seed_1)
+#             if random.random() < GENE_MUTATION_RATE:
+#                 if available:
+#                     random.seed(seed_tracker.mutation_seed_2)
+#                     new_pair = random.choice(available)
+#                     child[i] = new_pair
+    for child in tqdm(offspring):
+        current_set = set(child)
+        available = list(all_possible_pairs - current_set)
+
+        if not available:
+            continue  # skip if nothing to mutate to
+
         for i in range(N_GENES):
             random.seed(seed_tracker.mutation_seed_1)
             if random.random() < GENE_MUTATION_RATE:
-                current_pairs = set(child)
-                available = list(all_possible_pairs - current_pairs)
-                if available:
-                    random.seed(seed_tracker.mutation_seed_2)
-                    new_pair = random.choice(available)
-                    child[i] = new_pair
+                new_pair = random.choice(available)
+                available.remove(new_pair)   # avoid duplicate mutation
+                current_set.remove(child[i])
+                current_set.add(new_pair)
+                child[i] = new_pair
 
 
     # Form new population
@@ -470,5 +557,4 @@ score_tracker.to_csv(os.path.join(data_path, 'processed', 'joint_interaction_res
 with open(os.path.join(data_path, 'interim', 'joint_interaction_residuals_ga_solution_pairs' + fn + '.txt'), "w") as f:
     for item in best_set:
         f.write(f"{item}\n")
-
 
