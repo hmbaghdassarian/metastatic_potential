@@ -454,8 +454,8 @@ print('Start permutation testing')
 
 # In[151]:
 
-
-feature_combs = [(ols_res.loc[i, 'feature_1'], ols_res.loc[i, 'feature_2']) for i in ols_res.index]
+n_cores = 1
+feature_combs = list(set([(ols_res.loc[i, 'feature_1'], ols_res.loc[i, 'feature_2']) for i in ols_res.index]))
 n_perm = 1000
 
 if n_cores in [0, 1, None]:
@@ -505,7 +505,7 @@ else:
 res_all = pd.DataFrame(res_all, columns = ['feature_1', 'feature_2', 'coef', 'pval'])
 _, bh_fdr, _, _ = multipletests(res_all.pval, method='fdr_bh')
 res_all['bh_fdr'] = bh_fdr
-res_all.to_csv(os.path.join(data_path, 'interim', 'joint_interaction_permutation.csv'))
+res_all.to_csv(os.path.join(data_path, 'interim', 'joint_interaction_permutation_serial.csv'))
 
 
 # In[ ]:
