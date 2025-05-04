@@ -62,7 +62,7 @@ def mixup(X, y, n_synthetic, alpha=2, random_state=None):
     
     return synthetic_X, synthetic_y
 
-def get_stats(model, y_train, y_test, X_train, X_test):
+def get_stats(model, y_train, y_test, X_train, X_test, get_cod = False):
     model.fit(X_train, y_train)
     y_train_pred = model.predict(X_train)
     y_test_pred = model.predict(X_test)
@@ -72,6 +72,11 @@ def get_stats(model, y_train, y_test, X_train, X_test):
     
     train_mse = mean_squared_error(y_train, y_train_pred)
     test_mse = mean_squared_error(y_test, y_test_pred)
+    
+    if get_cod: # get coefficient of determination
+        r2 = 1 - np.sum((y_test - y_test_pred) ** 2) / np.sum((y_test - np.mean(y_test)) ** 2)
+        return train_corr, test_corr, train_mse, test_mse, r2
+
     
     return train_corr, test_corr, train_mse, test_mse
 
