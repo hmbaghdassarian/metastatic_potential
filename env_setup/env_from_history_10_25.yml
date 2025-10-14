@@ -1,0 +1,31 @@
+name: metastatic_potential
+channels:
+  - bioconda
+  - conda-forge
+  - https://ftp.osuosl.org/pub/open-ce/current
+  - https://ftp.osuosl.org/pub/open-ce/1.10.0
+dependencies:
+  - scikit-learn
+  - ipykernel
+  - r-glmnet
+  - r-dosnow
+  - r-irkernel
+  - conda-forge::pandas
+  - ca-certificates
+  - openssl
+  - conda-forge::seaborn
+  - conda-forge::openpyxl
+  - certifi
+  - conda-forge::tqdm
+  - conda-forge::r-rhpcblasctl
+  - gcc_linux-ppc64le
+  - gxx_linux-ppc64le
+  - conda-forge::xgboost
+  - conda-forge::plotnine
+  - conda-forge::optuna
+  - conda-forge::cmaes
+  - conda-forge::kneed
+  - conda-forge::requests
+  - conda-forge::pygad
+  - conda-forge::networkx
+prefix: /nobackup/users/hmbaghda/Software/miniforge3/envs/metastatic_potential
