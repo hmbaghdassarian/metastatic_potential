@@ -5,6 +5,8 @@ from scipy.stats import pearsonr
 from sklearn.metrics import mean_squared_error
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cross_decomposition import PLSRegression
+from statsmodels.nonparametric.smoothers_lowess import lowess
+
 
 import pathlib
 import pickle
@@ -105,9 +107,11 @@ def read_pickled_object(file_name: str):
         return pickle.load(handle)
         
 # Feature selection transformer
-class FeatureSelector(BaseEstimator, TransformerMixin):
-    def __init__(self, method='top_n_cv', n_features=None):
-        if method not in ['top_n_cv']:#, 'all_features']:
+class RNAFeatureSelector(BaseEstimator, TransformerMixin):
+    def __init__(self, method='top_residuals', n_features=None):
+        if method == 'top_n_cv': 
+            raise ValueError('Coefficient of variation selection is deprecated')
+        elif method not in ['top_residuals']:
             raise ValueError('Incorrect feature selection method implemented')
         self.method = method
         self.n_features = n_features
@@ -116,9 +120,54 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
         if self.method == 'top_n_cv':
             self.coefficient_of_variation_ = np.std(X, axis=0) / np.mean(X, axis=0)
             self.top_indices_ = np.argsort(self.coefficient_of_variation_)[::-1][:self.n_features]
-#         elif self.method == 'all_features':
-#             self.top_indices_ = range(X.shape[1])
+        elif self.method == 'top_residuals':
+            # shift to positive domain
+            min_val = np.min(X)
+            shift = -min_val + 1e-8 if min_val < 0 else 0
+            X_shifted = X + shift
+
+            # log-transform mean and variance
+            m_log = np.log(X_shifted.mean(axis=0) + 1e-16)
+            v_log = np.log(X_shifted.var(axis=0, ddof=1) + 1e-16)
+
+            # fit LOWESS mean–variance trend
+            y_fit = lowess(v_log, m_log, frac=0.3, return_sorted=False)
+
+            # compute residuals (signed: high positive = more variable)
+            resid = v_log - y_fit
+
+            self.top_indices_ = np.argsort(resid)[::-1][:self.n_features]
         return self
+    
+    def transform(self, X, y=None):
+        return X[:, self.top_indices_]
+    
+class ProteinFeatureSelector(BaseEstimator, TransformerMixin):
+    def __init__(self, method='top_residuals', n_features=None):
+        if method == 'top_n_cv': 
+            raise ValueError('Coefficient of variation selection is deprecated')
+        elif method not in ['top_residuals']:
+            raise ValueError('Incorrect feature selection method implemented')
+        self.method = method
+        self.n_features = n_features
+
+    def fit(self, X, y=None):
+        if self.method == 'top_n_cv':
+            self.coefficient_of_variation_ = np.std(X, axis=0) / np.mean(X, axis=0)
+            self.top_indices_ = np.argsort(self.coefficient_of_variation_)[::-1][:self.n_features]
+        elif self.method == 'top_residuals':
+            m = X.mean(axis=0)
+            v = X.var(axis=0, ddof=1)
+
+            # fit LOWESS mean–variance trend
+            y_fit = lowess(v, m, frac=0.3, return_sorted=False)
+
+            # compute residuals (signed: high positive = more variable)
+            resid = v - y_fit
+
+            self.top_indices_ = np.argsort(resid)[::-1][:self.n_features]
+        return self
+    
     def transform(self, X, y=None):
         return X[:, self.top_indices_]
     
