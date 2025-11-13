@@ -1,6 +1,8 @@
 """Utility functions for metastatic potential predictive modeling"""
 
 import numpy as np
+import pandas as pd
+
 from scipy.stats import pearsonr
 from sklearn.metrics import mean_squared_error
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -227,7 +229,6 @@ class ModalitySelector(BaseEstimator, TransformerMixin):
             return X[0]  # Return X_protein
         elif self.modality == 'rna':
             return X[1]  # Return X_rna
-    
 
 def pearson_corr_scorer(y_true, y_pred):
     return pearsonr(y_true, y_pred)[0]
@@ -238,3 +239,104 @@ class PLSRegression_X(PLSRegression):
         if isinstance(X_transformed, tuple):
             X_transformed = X_transformed[0]
         return X_transformed
+    
+    
+def aggregate_ranks(
+    opt_res: pd.DataFrame,
+    feature_col: str,
+    metric_directions: dict,
+    method: str = "mean"
+) -> pd.DataFrame:
+    """
+    Compute per-metric ranks for features and aggregate them into a 
+    consensus ranking across multiple metrics, with directional control
+    for each metric (higher-is-better or lower-is-better).
+
+    Parameters
+    ----------
+    opt_res : pd.DataFrame
+        Input DataFrame containing the feature name column and metric columns.
+    
+    feature_col : str
+        Column name identifying the feature names.
+
+    metric_directions : dict
+        Mapping {metric_col: "higher" or "lower"}, specifying whether
+        higher values of each metric should correspond to better (rank 1)
+        or worse. The keys define which metric columns are ranked.
+        Example: {"test_mse": "lower", "test_corr": "higher"}
+
+    method : str, optional (default: "mean")
+        Aggregation method across metrics:
+            - **"mean"**
+                Compute the arithmetic mean of the per-metric ranks.
+                Favors features that consistently achieve good ranks across metrics.
+                Sensitive to outlier (very poor) ranks.
+
+            - **"median"**
+                Compute the median of the per-metric ranks.
+                More robust to noise or extreme values than the mean.
+                Emphasizes typical (central) ranking performance.
+
+            - **"min"**
+                Use the minimum (best) rank across metrics.
+                An optimistic criterion: selects features that perform very well on at
+                least one metric.
+
+            - **"max"**
+                Use the maximum (worst) rank across metrics.
+                A pessimistic criterion: favors features that never perform poorly on
+                any metric, emphasizing stability.
+
+            - **"rank_product"**
+                Compute the geometric mean of ranks:
+                ``(r1 * r2 * ... * rK) ** (1/K)``.
+                Strongly favors features that consistently achieve high (low-numbered)
+                ranks across metrics.
+                Commonly used in genomics and meta-analysis (RankProd).
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with:
+        - feature_col
+        - per-metric rank columns
+        - consensus_score
+        - consensus_rank (1 = best)
+        sorted by consensus_score ascending.
+    """
+
+    df = opt_res.copy()
+    direction_map = {'lower': True, 'higher': False}
+    rank_cols = []
+
+    # Compute ranks per metric, using directions
+    for col, direction in metric_directions.items():
+        rank_col = "{}_rank".format(col)
+        df[rank_col] = df[col].rank(method='average', ascending = direction_map[direction])
+        rank_cols.append(rank_col)
+
+    # Matrix of ranks
+    R = df[rank_cols].values
+
+    # Aggregate ranks
+    method = method.lower()
+    if method == "mean":
+        consensus = R.mean(axis=1)
+    elif method == "median":
+        consensus = np.median(R, axis=1)
+    elif method == "min":
+        consensus = R.min(axis=1)
+    elif method == "max":
+        consensus = R.max(axis=1)
+    elif method == "rank_product":
+        consensus = np.exp(np.log(R).mean(axis=1))  # geometric mean
+    else:
+        raise ValueError(f"Unknown aggregation method: {method}")
+
+    # Final consensus score and rank
+    df["consensus_score"] = consensus
+    df["consensus_rank"] = df["consensus_score"].rank(method="average", ascending=direction_map['lower'])
+    df = df.sort_values("consensus_score", ascending=True).reset_index(drop=True)
+
+    return df
