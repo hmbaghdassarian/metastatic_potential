@@ -253,18 +253,22 @@ n_trials = 100
 # In[6]:
 
 
-cmaes_sampler = CmaEsSampler(seed=random_state, 
-                             warn_independent_sampling=False, 
-                            restart_strategy='bipop')
+def initialize_sampler(seed):
 
-exploration_sampler = RandomSampler(seed=random_state)
-tpe_sampler = RandomTPESampler(seed=random_state, 
-                               n_startup_trials = 15,
-                               exploration_sampler = exploration_sampler, 
-                               exploration_freq=20 # randomly sample every n trials
-                              )
-# tpe_sampler = TPESampler(seed=random_state, 
-#                         n_startup_trials = 20)
+    cmaes_sampler = CmaEsSampler(seed=random_state, 
+                                 warn_independent_sampling=False, 
+                                restart_strategy='bipop')
+
+    exploration_sampler = RandomSampler(seed=seed)
+    tpe_sampler = RandomTPESampler(seed=seed, 
+                                   n_startup_trials = 15,
+                                   exploration_sampler = exploration_sampler, 
+                                   exploration_freq=20 # randomly sample every n trials
+                                  )
+
+    hybrid_sampler = HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler)
+
+    return hybrid_sampler
 
 
 # In[114]:
@@ -291,10 +295,10 @@ for model_type in ['SVR_linear', 'PLS', 'Ridge', 'Lasso', 'ElasticNet',
             X_train, X_test = X[train_idx], X[test_idx]
             y_train, y_test = y[train_idx], y[test_idx]
 
-
+            hybrid_sampler = initialize_sampler(seed = random_state) # + k)
             pruner = optuna.pruners.SuccessiveHalvingPruner()
             study = optuna.create_study(direction="minimize", 
-                                        sampler=HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler), 
+                                        sampler=hybrid_sampler, 
                                        pruner = pruner, 
                                        study_name = '{}_optuna'.format(k))
             study.optimize(

@@ -9,6 +9,8 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cross_decomposition import PLSRegression
 from statsmodels.nonparametric.smoothers_lowess import lowess
 
+from sklearn.base import clone
+
 
 import pathlib
 import pickle
@@ -67,6 +69,7 @@ def mixup(X, y, n_synthetic, alpha=2, random_state=None):
     return synthetic_X, synthetic_y
 
 def get_stats(model, y_train, y_test, X_train, X_test, get_cod = False):
+    model = clone(model)
     model.fit(X_train, y_train)
     y_train_pred = model.predict(X_train)
     y_test_pred = model.predict(X_test)
@@ -190,9 +193,23 @@ class HybridSampler(optuna.samplers.BaseSampler):
         # Let the primary sampler define the relative search space
         return self.primary_sampler.infer_relative_search_space(study, trial)
 
+#     def sample_relative(self, study, trial, search_space):
+#         # Let the primary sampler handle relative sampling
+#         return self.primary_sampler.sample_relative(study, trial, search_space)
+    
     def sample_relative(self, study, trial, search_space):
-        # Let the primary sampler handle relative sampling
-        return self.primary_sampler.sample_relative(study, trial, search_space)
+            # CMA-ES requires at least 2 parameters.
+            # If fewer, fall back to TPE/random to avoid the AssertionError.
+            continuous_params = sum(
+                1 for dist in search_space.values() 
+                if not isinstance(dist, CategoricalDistribution)
+            )
+
+            # Use fallback if not enough continuous parameters for CMA-ES
+            if continuous_params < 2:
+                return self.fallback_sampler.sample_relative(study, trial, search_space)
+
+            return self.primary_sampler.sample_relative(study, trial, search_space)
 
     def sample_independent(self, study, trial, param_name, param_distribution):
         # Use the fallback sampler for unsupported parameter types

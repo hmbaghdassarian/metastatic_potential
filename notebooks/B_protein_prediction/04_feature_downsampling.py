@@ -7,16 +7,26 @@
 # 
 # In the previous notebook, we down-samples the sumple numbers of the transcriptomics as a comparison. Here, we will also downsample the transcriptomic features to that of the protein dataset to see how this effects model performance. 
 
-# In[203]:
+# In[1]:
+
+
+# see section 2.3 for details of this
+subset_intersect_unbias = True
+
+
+# In[2]:
 
 
 import os
 import json
-from tqdm import tqdm
+from tqdm import tqdm, trange
 
 import pandas as pd
 import numpy as np
 from scipy import stats
+import statistics
+from sklearn.neighbors import KernelDensity
+
 
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -26,25 +36,23 @@ sys.path.insert(1, '../')
 from utils import read_pickled_object, cohen_d
 
 
-# In[204]:
+# In[3]:
 
 
 data_path = '/home/hmbaghda/orcd/pool/metastatic_potential/'
 random_state = 1024
 
-n_cores = 30
-os.environ["OMP_NUM_THREADS"] = str(n_cores)
-os.environ["MKL_NUM_THREADS"] = str(n_cores)
-os.environ["OPENBLAS_NUM_THREADS"] = str(n_cores)
-os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_cores)
-os.environ["NUMEXPR_NUM_THREADS"] = str(n_cores)
+from threadpoolctl import threadpool_limits
+n_cores = 64
+for v in ["OMP_NUM_THREADS","MKL_NUM_THREADS","OPENBLAS_NUM_THREADS","NUMEXPR_NUM_THREADS"]:
+    os.environ[v] = "1" # 1 thread per process; CV handles parallelism
 
 
-# # 0. Map Features
+# # Map Features
 
 # Load the files:
 
-# In[205]:
+# In[4]:
 
 
 # protein
@@ -65,7 +73,7 @@ X_rna = expr_rna.values
 y_rna = mp_rna['mean'].values.ravel()
 
 
-# In[206]:
+# In[5]:
 
 
 # map from uniprot ID to gene name
@@ -122,7 +130,7 @@ for protein_id in protein_cols:
 # n_protein_names = len(set(protein_names))
 
 
-# In[207]:
+# In[6]:
 
 
 rna_names = [rna_id.split(' (')[0] for rna_id in rna_cols]
@@ -136,7 +144,7 @@ rna_map = dict(zip(rna_cols, rna_names))
 protein_map = dict(zip(protein_cols, protein_names))
 
 
-# # 1. Top Transcriptomics Features
+# # Top Transcriptomics Features
 # 
 # First, let's see how many of the top transcriptomic features are present in the proteomic dataset, as well as how the rankings compare to the features selected in the proteomics model. The expectation is, that if our hypothesis is true, the top transcriptomic features are ones that are not present in proteomics (and thus, proteomics is just missing measurement of genes that are informative of metastasis).  
 # 
@@ -146,7 +154,7 @@ protein_map = dict(zip(protein_cols, protein_names))
 
 # Load and fit the models:
 
-# In[208]:
+# In[7]:
 
 
 # protein
@@ -158,7 +166,7 @@ best_pipeline_rna = read_pickled_object(os.path.join(data_path, 'processed', 'be
 best_pipeline_rna.fit(X_rna, y_rna)
 
 
-# In[209]:
+# In[8]:
 
 
 def get_ranked_coefs(best_pipeline, gene_map, gene_cols):
@@ -183,14 +191,16 @@ def get_ranked_coefs(best_pipeline, gene_map, gene_cols):
     return model_coefs
 
 
-# In[210]:
+# ## Fraction present
+
+# In[9]:
 
 
 model_coefs_protein = get_ranked_coefs(best_pipeline_protein, protein_map, protein_cols)
 selected_protein_genes = set(model_coefs_protein.Gene_Name)
 
 
-# In[211]:
+# In[10]:
 
 
 model_coefs_rna = get_ranked_coefs(best_pipeline_rna, rna_map, rna_cols)
@@ -210,7 +220,7 @@ model_coefs_rna['in_protein_selected'] = pd.Categorical(model_coefs_rna.in_prote
                                               categories = [True, False])
 
 
-# In[212]:
+# In[11]:
 
 
 model_coefs_rna['fraction_overlap_all'] = np.nan
@@ -225,57 +235,9 @@ for rank in tqdm(model_coefs_rna.index):
 model_coefs_rna['feature_rank'] = model_coefs_rna.index+1
 
 
-# In[213]:
+# ## Correlation in Model Coefficients
 
-
-viz_df = model_coefs_rna.copy()
-viz_df['rank'] = [i +1 for i in viz_df.index.tolist()]
-
-
-# In[214]:
-
-
-fig, ax = plt.subplots(figsize = (10,5), ncols = 2)
-
-viz_df = model_coefs_rna.copy()
-viz_df['rank'] = [i +1 for i in viz_df.index.tolist()]
-
-
-sns.lineplot(data = viz_df, x = 'rank', y = 'fraction_overlap_all', ax = ax[0])
-ax[0].set_xscale('log')
-ax[0].set_ylabel('Fraction of RNA Feature Present in Proteomics')
-ax[0].set_xlabel('Transcriptomic Model Feature Rank')
-
-sns.lineplot(data = viz_df, x = 'rank', y = 'fraction_overlap_selected', ax = ax[1])
-ax[1].set_xscale('log')
-ax[1].set_ylabel('Fraction of RNA Features Selected in Proteomics Pipeline')
-ax[1].set_xlabel('Transcriptomic Model Feature Rank')
-
-fig.tight_layout()
-
-plt.savefig(os.path.join(data_path, 'figures', 'intersection_rank.png'), 
-            dpi=300, 
-            bbox_inches="tight")  
-("")
-
-
-# In[215]:
-
-
-model_coefs_rna[model_coefs_rna['feature_rank'].isin([1, 5, 100, 500])][
-    ['feature_rank', 'fraction_overlap_all', 'fraction_overlap_selected']
-]
-
-
-# Using the consensus transcriptomics linear SVR model for the feature ranks:
-#     
-# On the left panel, we see the fraction of transcriptomic features at that rank that are present in proteomics. If our hypothesis is true, we would expect that at higher ranks, there would be fewer features present in transcriptomics than at lower ranks. 
-# 
-# Here, the overall trend indicates the opposite of our hypothesis: those features most important for the transcriptomics model are in fact present in the proteomics dataset. However, it is important to keep in mind that this can be more nuanced: for example, in the top 5-100 features, the overlap drops from 100% to 70%. It is possible that that missing 30% of features makes all the difference. We see that when looking only at selected features in the proteomic model (right panel), there is not a steep dropoff in overlap as compared to looking at all proteomics features (left panel) -- indicating that when the top transcriptomic feature *is* present in the proteomics dataset, it is also selected for by the proteomics model. 
-# 
-# In the slight discrepancy, this could indicate that those additional differing features are not as informative in one modality as compared to the other. Let's look at overall model fits to see whether information is generally similar with regards to phenotype in the model fits:
-
-# In[216]:
+# In[12]:
 
 
 rna_genes = model_coefs_rna.Gene_Name.tolist()
@@ -313,7 +275,7 @@ model_coefs_joint['{} Feature Rank'.format(modality_ranker)] = (
 model_coefs_joint.sort_values(by = '{} Feature Rank'.format(modality_ranker), ascending = True, inplace = True)
 
 
-# In[217]:
+# In[13]:
 
 
 rank_pearson = {'{} Feature Rank'.format(modality_ranker): [], 'Pearson Correlation': []}
@@ -326,59 +288,351 @@ for i in range(4, model_coefs_joint.shape[0]):
 rank_pearson = pd.DataFrame(rank_pearson)
 
 
-# In[218]:
+# In[14]:
 
 
-fig, ax = plt.subplots()
+fig, ax = plt.subplots(figsize = (10,5), ncols = 2)
+
+
+i = 0
+
+viz_df = model_coefs_rna.copy()
+viz_df['rank'] = [i +1 for i in viz_df.index.tolist()]
+
+
+
+
+sns.lineplot(data = viz_df, x = 'rank', y = 'fraction_overlap_all', ax = ax[i], 
+             color = sns.color_palette('Set1')[1], alpha=0.5,
+             label = 'All Proteomic Features', zorder = 1,
+            )
+sns.lineplot(data = viz_df, x = 'rank', y = 'fraction_overlap_selected', ax = ax[i], 
+             color = sns.color_palette('Set1')[2], alpha = 0.5,
+             label = 'Model-Selected Proteomic Features', zorder = 0)
+ax[i].set_xscale('log')
+ax[i].set_xlabel('Transcriptomic Model Feature Rank')
+ax[i].set_ylabel('Fraction of RNA Feature Present in Proteomics')
+
+i = 1
 rank_pearson = pd.DataFrame(rank_pearson)
-sns.lineplot(data = rank_pearson, x = '{} Feature Rank'.format(modality_ranker), y = 'Pearson Correlation', ax = ax)
-ax.set_xlabel('{} Model Feature Rank'.format(modality_ranker))
-ax.set_xscale('log')
+sns.lineplot(data = rank_pearson, x = '{} Feature Rank'.format(modality_ranker), y = 'Pearson Correlation', ax = ax[i])
+ax[i].set_xlabel('{} Model Feature Rank'.format(modality_ranker))
+ax[i].set_xscale('log')
+ax[i].set_ylabel('Pearson Correlation of \n Model Coefficients Fit on Either Modality')
 ("")
 
 
-# In the above plot we:
+fig.tight_layout()
+
+# plt.savefig(os.path.join(data_path, 'figures', 'intersection_rank.png'), 
+#             dpi=300, 
+#             bbox_inches="tight")  
+("")
+
+
+# In[15]:
+
+
+model_coefs_rna[model_coefs_rna['feature_rank'].isin([1, 5, 100, 500])][
+    ['feature_rank', 'fraction_overlap_all', 'fraction_overlap_selected']
+]
+
+
+# We're looking for support of the hypothesis that: transcriptomics models outperform proteomics due to higher genome-wide coverage in measurement.
+#     
+# On the left panel, we see the fraction of transcriptomic features at that rank that are present in proteomics (either all proteomics features or model-selected proteomics features). 
+# 
+# Considering the blue line, all proteomics features, ff our hypothesis is true, we would expect that at higher ranks, there would be fewer features present in transcriptomics than at lower ranks. Here, the overall trend indicates the opposite of our hypothesis: those features most important for the transcriptomics model are in fact present in the proteomics dataset. However, it is important to keep in mind that this can be more nuanced: for example, in the top 5-100 features, the overlap drops from 100% to 70%. It is possible that that missing 30% of features makes all the difference in model performance. 
+# 
+# This is supported when looking only at selected features in the proteomic model (green line) -- amongst the top 500 and even 1000 features, this overlap does not drop off steeply from all proteomic features (i.e., green line mirrors blue line). This indicates that when the same high ranking features *are* available to the proteomics model, it will use them. 
+# 
+# Finally, we can look specifically at how the model uses those same features. We: 
 # 
 # 1) Subset to the overlapping selected features between the two models (taking the mean SVM coefficient) in instances of many to one mappings)
 # 2) x-axis: Rank order by absolute value SVM coefficient of the transcriptomcis model. 
 # 3) y-axis: At a given feature rank, calculate the Pearson correlation of the SVM coefficient 
 # 
-# Nearly all selected proteomics models were present in transcriptomics. This allowed us to assess similarity of model fits between the two modalities. Across all common features, a moderate to high Pearson correlation is maintained. The correlation is stronger at higher features. This tells us two things:
+# Nearly all selected proteomics models were present in transcriptomics. This allowed us to assess similarity of model fits between the two modalities. Across all common features, atleast a moderate Pearson correlation is maintained. This further supports the notion that when a gene is measured by both assays, the proteomics and transcriptomics models agree strongly on its importance and direction.
 # 
-# 1) When a gene is measured by both assays, the proteomics and transcriptomics models agree strongly on its importance and direction.
-# 2) There is some indication that the two modalities carry similar information by this rank ordering. This will be further addressed in the folder C notebooks.
+# It brings up an interesting secondary point, which is that this seems to indicate that the two modalities carry similar information on phenotype. The slight discrepancy between the green and blue line could indicate those instances where the two modalities carry distinct information. Altogether, this brings up an important question: How similar is the information on phenotype between the two modalities, and how would a model with access to both simultaneously utilize these similarities/dissimilarities? We will address this more in Notebook C. 
 
-# # 2. Intersection with Proteomic Features
+# ## Relative Rank of Non-Intersecting Genes
+# 
+# This is simply a sanity check that we are not removing just non-negligible (low-rank) genes from one modality but very important genes from the other. For example, if we had an enrichment of un-important genes we were removing in transcriptomics, we would expect model performance to increase because we are reducing the dimensionality (since samples << features). Or, if we only removed important genes from proteomics and unimportant ones from transcriptomics, this would bias analyses. 
+# 
+# Thus, we take the normalized rank of each features from consensus models fit on the full feature space of each modality and look at the distribution of the non-intersecting genes (those that are dropped). 
+
+# In[16]:
+
+
+normalized_coefs = []
+for model_coefs in [model_coefs_rna, model_coefs_protein]:
+    model_coefs = model_coefs[['Gene_Name', 'abs_SVM_rank']].copy()
+    model_coefs['normalized_rank'] = (model_coefs['abs_SVM_rank'] - 1) / (model_coefs['abs_SVM_rank'].max() - 1)
+    model_coefs['does_intersect'] = model_coefs.Gene_Name.isin(intersect_names).copy()
+    normalized_coefs.append(model_coefs)
+normalized_coefs_rna, normalized_coefs_protein = normalized_coefs
+
+normalized_coefs_map = {
+    'Transcriptomics': normalized_coefs_rna, 
+    'Proteomics': normalized_coefs_protein
+}
+
+
+# In[17]:
+
+
+fig, ax = plt.subplots(ncols = 2, figsize = (10, 5))
+
+for (i, modality) in enumerate(['Transcriptomics', 'Proteomics']):
+    normalized_coefs = normalized_coefs_map[modality]
+    mask = ~(normalized_coefs.does_intersect)
+
+    sns.histplot(data = normalized_coefs.loc[mask], x = 'normalized_rank', ax = ax[i])
+    ax[i].set_title(modality)
+    ax[i].set_xlabel('Normalized Rank')
+
+fig.suptitle('Rank Distribution of Non-Intersecting Genes')
+("")
+
+
+# Ok, this looks reasonable. However, we can see that the tail ends of either rank are opposing, so there is some bias. Let's see if we can identify a subset of 95% of intersecting features that makes this smoother. We'll just use a brute force approach, iterating 2e4 times and creating subsets, quantifying them by the Anderson-Darling statistic and choosing the one that minimizes the average across the two distributions. 
+
+# In[18]:
+
+
+def get_normalized_rank(model_coefs, intersect_names):
+    normalized_coefs = model_coefs[['Gene_Name', 'abs_SVM_rank']].copy()
+    normalized_coefs['normalized_rank'] = (normalized_coefs['abs_SVM_rank'] - 1) / (normalized_coefs['abs_SVM_rank'].max() - 1)
+    normalized_coefs['does_intersect'] = normalized_coefs.Gene_Name.isin(intersect_names).copy()
+
+    normalized_coefs = normalized_coefs[~normalized_coefs.does_intersect]
+
+    return normalized_coefs
+
+
+# def normalized_entropy(ranks):
+#     ranks = ranks.reshape(-1, 1)
+#     kde = KernelDensity(kernel='gaussian', bandwidth=0.1).fit(ranks)
+#     log_p = kde.score_samples(ranks)
+#     p = np.exp(log_p)
+#     p /= p.sum()
+#     H = -np.sum(p * np.log(p + 1e-12))
+#     return H / np.log(len(p))
+
+def anderson_darling_uniform(ranks):
+    r = np.sort(ranks)
+    n = len(r)
+    i = np.arange(1, n+1)
+    term = (2*i - 1) * (np.log(r + 1e-12) + np.log(1 - r[::-1] + 1e-12))
+    A2 = -n - np.mean(term)
+    return A2
+
+def ad_corrected(ranks):
+    r = np.sort(ranks)
+    n = len(r)
+    i = np.arange(1, n+1)
+    A2 = -n - np.mean((2*i - 1) * (np.log(r + 1e-12) + np.log(1 - r[::-1] + 1e-12)))
+    return A2 * (1 + 0.75/n + 2.25/n**2)
+
+
+
+
+
+# In[19]:
+
+
+subset_frac = 0.95
+total_iter = int(2e4)
+
+n_total_intersect = len(intersect_names)
+n_subset_intersect = int(np.round(subset_frac*n_total_intersect))
+
+
+# In[20]:
+
+
+modality_map = {
+    'Transcriptomics': model_coefs_rna, 
+    'Proteomics': model_coefs_protein
+}
+
+sorted_intersect_names = sorted(intersect_names) # for no randomness
+
+if not os.path.isfile(os.path.join(data_path, 'interim', "intersect_features_subset.txt")):
+    # initial values:
+    scores = []
+    for modality, model_coefs in modality_map.items():
+        normalized_coefs = get_normalized_rank(model_coefs, intersect_names)
+        score = ad_corrected(normalized_coefs.normalized_rank.values)
+        scores.append(score)
+
+    best_scores = scores
+    best_score = 0.5 * (scores[0] + scores[1])
+    best_intersect = intersect_names
+
+    np.random.seed(random_state)
+    for i in trange(total_iter):
+        intersect_names_sub = list(np.random.choice(sorted_intersect_names, size = n_subset_intersect, replace = False))
+
+        scores = []
+        for modality, model_coefs in modality_map.items():
+            normalized_coefs = get_normalized_rank(model_coefs, intersect_names_sub)
+            score = ad_corrected(normalized_coefs.normalized_rank.values)
+            scores.append(score)
+        score = 0.5 * (scores[0] + scores[1])
+
+        if score < best_score:
+            best_scores = scores
+            best_score = score
+            best_intersect = intersect_names_sub
+
+    with open(os.path.join(data_path, 'interim', "intersect_features_subset.txt"), "w") as f:
+        for item in best_intersect:
+            f.write(str(item) + "\n")
+else:
+    with open(os.path.join(data_path, 'interim', "intersect_features_subset.txt"), "r") as f:
+        best_intersect = [line.strip() for line in f]
+
+
+
+
+# In[21]:
+
+
+normalized_coefs_map = {}
+for modality, model_coefs in modality_map.items():
+    normalized_coefs_map[modality] = get_normalized_rank(model_coefs, best_intersect)
+
+fig, ax = plt.subplots(ncols = 2, figsize = (10, 5))
+
+for (i, modality) in enumerate(['Transcriptomics', 'Proteomics']):
+    normalized_coefs = normalized_coefs_map[modality]
+    mask = ~(normalized_coefs.does_intersect)
+
+    sns.histplot(data = normalized_coefs.loc[mask], x = 'normalized_rank', ax = ax[i])
+    ax[i].set_title(modality)
+    ax[i].set_xlabel('Normalized Rank')
+
+fig.suptitle('Rank Distribution of Non-Intersecting Genes')
+("")
+
+
+# We can see that there is less tail bias for both distributions after selecting a 95% subset of intersecting genes. 
+
+# In[19]:
+
+
+rna_cols_intersect = [rna_cols[i] for i, rna_name in enumerate(rna_names) if rna_name in intersect_names]
+protein_cols_intersect = [protein_cols[i] for i, protein_name in enumerate(protein_names) if protein_name in intersect_names]
+
+
+# RNA
+N = expr_rna.shape[1]
+n = len(rna_cols_intersect)
+
+msg = 'When taking the full intersection, {} of {} RNA features are dropped, leaving {} total '.format(
+    N-n, N, n
+)
+msg += 'The fraction of total features dropped is {:.4f}'.format((N-n)/N)
+msg += '\n\n'
+
+# Protein
+N = expr_protein.shape[1]
+n = len(protein_cols_intersect)
+
+
+msg += 'When taking the full intersection, {} of {} protein features are dropped, leaving {} total '.format(
+    N-n, N, n
+)
+msg += 'The fraction of total features dropped is {:.4f}'.format((N-n)/N)
+msg += '\n\n'
+
+N_selected = model_coefs_protein.shape[0]
+n_selected = np.sum(model_coefs_protein['Gene_Name'].isin(intersect_genes))
+msg += 'For proteomics, {} of the {} selected features are dropped, leaving {} total from the original selected list'.format(
+    N_selected - n_selected, N_selected, n_selected
+)
+msg += 'The fraction of features dropped is {:.4f}'.format((N_selected - n_selected)/N_selected)
+
+print(msg)
+print('=====================================Intersect Subset==============================================')
+### subset
+
+rna_cols_intersect = [rna_cols[i] for i, rna_name in enumerate(rna_names) if rna_name in best_intersect]
+protein_cols_intersect = [protein_cols[i] for i, protein_name in enumerate(protein_names) if protein_name in best_intersect]
+
+
+# RNA
+N = expr_rna.shape[1]
+n = len(rna_cols_intersect)
+
+msg = 'When taking the subsetted intersection, {} of {} RNA features are dropped, leaving {} total '.format(
+    N-n, N, n
+)
+msg += 'The fraction of total features dropped is {:.4f}'.format((N-n)/N)
+msg += '\n\n'
+
+# Protein
+N = expr_protein.shape[1]
+n = len(protein_cols_intersect)
+
+
+msg += 'When taking the subsetted intersection, {} of {} protein features are dropped, leaving {} total '.format(
+    N-n, N, n
+)
+msg += 'The fraction of total features dropped is {:.4f}'.format((N-n)/N)
+msg += '\n\n'
+
+N_selected = model_coefs_protein.shape[0]
+n_selected = np.sum(model_coefs_protein['Gene_Name'].isin(best_intersect))
+msg += 'For proteomics, {} of the {} selected features are dropped, leaving {} total from the original selected list'.format(
+    N_selected - n_selected, N_selected, n_selected
+)
+msg += 'The fraction of features dropped is {:.4f}'.format((N_selected - n_selected)/N_selected)
+
+print(msg)
+
+
+
+
+# We see that when we use this intersect, a slightly higher portion of transcriptomic and proteomic features were dropped than before. 
+# The loss of proteomics is stronger than transcriptomics; however, we will still be using the same intersection, and now with less bias in the rank removal, so this is a more fair test. 
+# 
+
+# # Intersection with Proteomic Features
 # 
 # Here, we re-run our prediction pipeline, starting again from hyperparameter tuning. We proceed with the linear SVRs as explained above. However, to make the comparison fair, in this case, for both transcriptomics and proteomics, we start with the intersection of features. Furthermore, we only use the samples in common between the two (similar to the power analysis).
 
-# In[228]:
+# In[23]:
 
 
 from scipy.stats import pearsonr
 
 from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import cross_val_score, KFold
-from sklearn.svm import SVR
+from sklearn.svm import SVR, LinearSVR
 from sklearn.pipeline import Pipeline
+from sklearn.base import clone
 
 import optuna
 from optuna.samplers import CmaEsSampler, TPESampler, RandomSampler
 
 from utils import MeanCenterer, HybridSampler, RandomTPESampler
 from utils import RNAFeatureSelector, ProteinFeatureSelector
+from utils import get_stats
 
 
-# In[229]:
+# In[24]:
 
 
 feature_selector_map = {'Transcriptomics': RNAFeatureSelector, 
                      'Proteomics': ProteinFeatureSelector}
 
 
-# ## 2.0: Map samples between proteomics and transcriptomics:
+# ## Map samples between proteomics and transcriptomics:
 
-# In[220]:
+# In[11]:
 
 
 md = pd.read_csv(os.path.join(data_path, 'raw', 'Model.csv'), index_col = 0)
@@ -396,7 +650,7 @@ with open(os.path.join(data_path, 'processed', 'proteomics_sample_mapper.json'),
     json.dump(sample_mapper, json_file, indent=4)
 
 
-# In[221]:
+# In[26]:
 
 
 common_samples = sorted(set(expr_protein.index).intersection(expr_rna.index))
@@ -405,7 +659,8 @@ print('Of the {} and {} samples in protein and RNA datasets, respectively, {} ar
                                                                                                 len(common_samples)))
 
 
-# In[222]:
+
+# In[69]:
 
 
 expr_protein_common = expr_protein.loc[common_samples, :]
@@ -415,14 +670,14 @@ mp_common = mp_protein.loc[common_samples, :]
 y_common = mp_common['mean'].values.ravel()
 
 
-# ## 2.1: Hyperparameter tuning
+# ## Hyperparameter tuning
 # 
 # This is conducted on all samples available to each dataset, as previously described in notebooks A/02 and B/02: 
 
-# In[223]:
+# In[28]:
 
 
-intersect_genes = set(rna_names).intersection(protein_names)
+intersect_genes = intersect_names.copy() if not subset_intersect_unbias else set(best_intersect)
 
 rna_cols_intersect = [rna_cols[i] for i, rna_name in enumerate(rna_names) if rna_name in intersect_genes]
 protein_cols_intersect = [protein_cols[i] for i, protein_name in enumerate(protein_names) if protein_name in intersect_genes]
@@ -441,7 +696,7 @@ if n_protein_features != n_rna_features:
     print(msg)
 
 
-# In[224]:
+# In[29]:
 
 
 def optuna_objective(trial, X, y, inner_cv, n_cores, random_state, modality):
@@ -460,6 +715,13 @@ def optuna_objective(trial, X, y, inner_cv, n_cores, random_state, modality):
         C=trial.suggest_float(model_type + "__C", 1e-4, 1e2, log = True),
         epsilon=trial.suggest_float(model_type + "__epsilon", 1e-3, 10, log=True)
     )))
+#     # computational speed up
+#     steps.append(("model", LinearSVR(
+#         C=trial.suggest_float(model_type + "__C", 1e-4, 1e2, log=True),
+#         epsilon=trial.suggest_float(model_type + "__epsilon", 1e-3, 10, log=True),
+#         random_state=random_state,
+#         max_iter=int(1e4)
+#     )))
 
     # Create the pipeline
     pipeline = Pipeline(steps)
@@ -484,12 +746,26 @@ def generate_best_pipeline(study, modality):
         C=best_params["SVR_linear__C"],
         epsilon=best_params['SVR_linear__epsilon']
     )))
+#     steps.append(("model", LinearSVR(
+#         C=best_params["SVR_linear__C"],
+#         epsilon=best_params["SVR_linear__epsilon"],
+#         random_state=random_state,
+#         max_iter=int(1e4)
+#     )))
+
+
     best_pipeline = Pipeline(steps)
     return best_pipeline
 
 
 
-# In[11]:
+# In[ ]:
+
+
+
+
+
+# In[30]:
 
 
 X_protein = expr_protein_common[protein_cols_intersect].copy().values
@@ -501,32 +777,58 @@ inner_folds=5
 n_trials = 100
 
 
-# In[12]:
+# In[31]:
 
 
-cmaes_sampler = CmaEsSampler(seed=random_state, 
-                             warn_independent_sampling=False, 
-                            restart_strategy='bipop')
+def initialize_sampler(seed):
 
-exploration_sampler = RandomSampler(seed=random_state)
-tpe_sampler = RandomTPESampler(seed=random_state, 
-                               n_startup_trials = 15,
-                               exploration_sampler = exploration_sampler, 
-                               exploration_freq=20 # randomly sample every n trials
-                              )
+    cmaes_sampler = CmaEsSampler(seed=random_state, 
+                                 warn_independent_sampling=False, 
+                                restart_strategy='bipop')
+
+    exploration_sampler = RandomSampler(seed=seed)
+    tpe_sampler = RandomTPESampler(seed=seed, 
+                                   n_startup_trials = 15,
+                                   exploration_sampler = exploration_sampler, 
+                                   exploration_freq=20 # randomly sample every n trials
+                                  )
+
+    hybrid_sampler = HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler)
+
+    return hybrid_sampler
 
 
-# In[3]:
+# In[32]:
+
+
+if subset_intersect_unbias:
+    fn = os.path.join(data_path, 'interim', 'pipeline_model_selection_featureintersect.csv')
+    fn_folds = os.path.join(data_path, 'interim', 'feature_intersection_folds.json')
+else:
+    fn = os.path.join(data_path, 'interim', 'pipeline_model_selection_featureintersect_nosubset.csv.csv')
+    fn_folds = os.path.join(data_path, 'interim', 'feature_intersection_folds_nosubset.json')
+
+
+# In[33]:
 
 
 outer_cv = KFold(n_splits=outer_folds, shuffle=True, random_state=random_state)
 inner_cv = KFold(n_splits=inner_folds, shuffle=True, random_state=random_state)
 
-results = []
-res_df = None
+if not os.path.isfile(fn):
+    results = []
+    res_df = None
+else:
+    res_df = pd.read_csv(fn, index_col = 0)
+    results = res_df.to_dict(orient="records")
 
+fold_idx = {}
 for k, (train_idx, test_idx) in enumerate(outer_cv.split(X_protein, y_common)):
     print(k)
+
+    fold_idx[k] = {'train_idx': train_idx.tolist(), 
+                      'test_idx': test_idx.tolist()}
+
     y_train, y_test = y_common[train_idx], y_common[test_idx]
 
     X = {'Proteomics': {}, 
@@ -536,9 +838,16 @@ for k, (train_idx, test_idx) in enumerate(outer_cv.split(X_protein, y_common)):
     X['Transcriptomics']['train'], X['Transcriptomics']['test'] = X_rna[train_idx], X_rna[test_idx]
 
     for modality in X:
+        # skip existing results
+        if res_df is not None:
+            mask = (res_df.fold == k) & (res_df.modality == modality)
+            if mask.any():
+                continue
+
+        hybrid_sampler = initialize_sampler(seed = random_state) # + k)
         pruner = optuna.pruners.SuccessiveHalvingPruner()
         study = optuna.create_study(direction="minimize", 
-                                    sampler=HybridSampler(primary_sampler=cmaes_sampler, fallback_sampler=tpe_sampler), 
+                                    sampler=hybrid_sampler, 
                                    pruner = pruner, 
                                    study_name = '{}_optuna'.format(k))
         study.optimize(
@@ -569,5 +878,9 @@ for k, (train_idx, test_idx) in enumerate(outer_cv.split(X_protein, y_common)):
             "inner_cv": study.trials_dataframe()
             })
         res_df = pd.DataFrame(results)
-        res_df.to_csv(os.path.join(data_path, 'interim', 'pipeline_model_selection_featureintersect.csv'))
+        res_df.to_csv(fn)
+
+
+with open(fn_folds, "w") as json_file:
+    json.dump(fold_idx, json_file, indent=4) 
 
