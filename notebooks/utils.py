@@ -11,6 +11,7 @@ from statsmodels.nonparametric.smoothers_lowess import lowess
 
 from sklearn.base import clone
 
+import math
 
 import pathlib
 import pickle
@@ -35,6 +36,12 @@ def cohen_d(vector_1, vector_2):
     pooled_std = np.sqrt(((n1 - 1) * std1**2 + (n2 - 1) * std2**2) / (n1 + n2 - 2))
 
     return (mean1 - mean2) / pooled_std
+
+
+def cohen_d_se(n1, n2, d):
+    """Return standard error for Cohens d"""
+    n = n1 + n2
+    return math.sqrt((n / (n1 * n2) + d**2 / (2 * (n - 2))) * (n / (n - 2)))
 
 def mixup(X, y, n_synthetic, alpha=2, random_state=None):
     """
